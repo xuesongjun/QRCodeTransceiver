@@ -1,0 +1,7 @@
+*.exe
+__pycache__/
+.claude/
+decoded/
+droplets/
+server.py
+*.txt
