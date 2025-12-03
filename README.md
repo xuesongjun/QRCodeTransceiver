@@ -12,6 +12,7 @@
 - **多线程截屏**：RX 使用独立线程截屏，提高处理速度
 - **GUI 接收端**：提供图形界面版本，可打包为独立 exe
 - **离线安装**：支持在无网络环境下安装部署
+- **多文件传输**：支持文件列表和通配符批量传输
 
 ## 快速安装
 
@@ -82,7 +83,8 @@ python qrcode_tx.py <文件路径> [选项]
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `filename` | 需要传输的文件路径 | (必需) |
+| `filename` | 需要传输的文件路径，支持通配符 | (与 -f 二选一) |
+| `-f, --file-list` | 文件列表文件，每行一个文件路径 | - |
 | `-o, --output` | 二维码图片输出目录 | `droplets` |
 | `--chunk-size` | 每个分块的字节数 | `512` |
 | `--extra` | 额外生成 droplet 的比例 | `0.5` (50%) |
@@ -107,6 +109,23 @@ python qrcode_tx.py myfile.zip --size 700 -i 100
 
 # 禁用压缩
 python qrcode_tx.py already_compressed.zip --no-compress
+
+# 多文件：使用通配符（注意：通配符必须加引号，否则会被 shell 展开）
+python qrcode_tx.py "*.txt"
+
+# 多文件：使用文件列表
+python qrcode_tx.py -f files.list
+```
+
+#### 文件列表格式
+
+文件列表 (`files.list`) 每行一个文件路径，支持 `#` 开头的注释：
+
+```
+# 要传输的文件列表
+document.pdf
+data/config.json
+logs/app.log
 ```
 
 ### 接收端 (RX)
