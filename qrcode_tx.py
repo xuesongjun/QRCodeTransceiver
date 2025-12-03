@@ -145,9 +145,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "filename",
-        nargs="?",
-        default=None,
-        help="需要传输的文件路径，支持通配符如 *.txt（可选，与 -f 二选一）。"
+        nargs="*",
+        default=[],
+        help="需要传输的文件路径，支持多个文件或通配符如 *.txt。"
     )
     parser.add_argument(
         "-f", "--file-list",
@@ -230,23 +230,23 @@ def get_file_list(args) -> List[Path]:
                     else:
                         print(f"警告：文件不存在，跳过：{line}")
 
-    # 从命令行参数读取（支持通配符）
-    if args.filename:
+    # 从命令行参数读取（支持多个文件和通配符）
+    for filename in args.filename:
         # 检查是否包含通配符
-        if "*" in args.filename or "?" in args.filename:
-            matched = glob.glob(args.filename, recursive=True)
+        if "*" in filename or "?" in filename:
+            matched = glob.glob(filename, recursive=True)
             for m in matched:
                 p = Path(m)
                 if p.is_file():
                     files.append(p)
             if not matched:
-                print(f"警告：通配符 {args.filename} 没有匹配到任何文件")
+                print(f"警告：通配符 {filename} 没有匹配到任何文件")
         else:
-            p = Path(args.filename)
+            p = Path(filename)
             if p.is_file():
                 files.append(p)
             else:
-                raise FileNotFoundError(f"找不到文件：{p}")
+                print(f"警告：文件不存在，跳过：{filename}")
 
     # 去重并保持顺序
     seen = set()
@@ -334,8 +334,8 @@ def main():
     # 获取文件列表
     if not args.filename and not args.file_list:
         print("错误：请指定文件路径或使用 -f 指定文件列表")
-        print("用法：python qrcode_tx.py <文件> 或 python qrcode_tx.py -f file.list")
-        print("      python qrcode_tx.py \"*.txt\"  # 通配符需要加引号")
+        print("用法：python qrcode_tx.py <文件...> 或 python qrcode_tx.py -f file.list")
+        print("      python qrcode_tx.py *.txt  # shell 会自动展开通配符")
         return
 
     files = get_file_list(args)
