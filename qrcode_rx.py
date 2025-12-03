@@ -296,6 +296,10 @@ class DropletAutoSaver:
         self.completed_total = 0
         # 已完成文件的特征：(num_chunks, padding, 文件内容哈希)
         self._completed_files: Set[Tuple[int, int, bytes]] = set()
+        # 多文件进度跟踪（从 header 解析）
+        self.total_files: int = 0  # 总文件数
+        self.received_files: int = 0  # 已接收文件数
+        self.current_filename: str = ""  # 当前正在接收的文件名
         self._reset_session()
 
     def _reset_session(self):
@@ -374,8 +378,14 @@ class DropletAutoSaver:
         total = self.glass.num_chunks
         received = len(self._seeds)
         bar = make_progress_bar(done, total)
+
+        # 构建进度信息
+        file_info = ""
+        if self.total_files > 0:
+            file_info = f"[{self.received_files + 1}/{self.total_files}] "
+
         # 使用 \r 覆盖同一行
-        print(f"\r接收中: {bar} 已收 {received} 包", end="", file=sys.stderr, flush=True)
+        print(f"\r{file_info}接收中: {bar} 已收 {received} 包", end="", file=sys.stderr, flush=True)
         if done == total:
             print(file=sys.stderr)  # 完成时换行
 
@@ -387,17 +397,35 @@ class DropletAutoSaver:
         return b"".join(chunks)
 
     def _split_payload(self, data: bytes) -> Tuple[str, bytes]:
+        """解析 payload，格式：文件名|文件编号|总文件数\n数据"""
         idx = data.find(b"\n")
         if idx != -1:
-            raw_name = data[:idx]
-            payload = data[idx + 1 :]
-            name = raw_name.decode("utf-8", errors="ignore").strip()
+            raw_header = data[:idx]
+            payload = data[idx + 1:]
+            header = raw_header.decode("utf-8", errors="ignore").strip()
+
+            # 解析新格式：文件名|文件编号|总文件数
+            parts = header.split("|")
+            if len(parts) >= 3:
+                name = parts[0]
+                try:
+                    file_index = int(parts[1])
+                    total_files = int(parts[2])
+                    # 更新多文件进度信息
+                    if total_files > 0:
+                        self.total_files = total_files
+                except ValueError:
+                    pass
+            else:
+                # 兼容旧格式：只有文件名
+                name = header
         else:
             payload = data
             name = ""
         if not name:
             name = f"qr_output_{self.file_index}"
         name = Path(name).name
+        self.current_filename = name
         # 自动解压
         payload = self._decompress(payload)
         return name, payload
@@ -432,7 +460,16 @@ class DropletAutoSaver:
             target = self.output_dir / f"{stem}_{int(time.time())}{suffix}"
         target.write_bytes(payload)
         self.completed_total += 1
-        self._log(f"已保存文件：{target}")
+        self.received_files += 1
+
+        # 显示文件保存进度
+        if self.total_files > 0:
+            self._log(f"已保存文件 [{self.received_files}/{self.total_files}]：{target}")
+            if self.received_files >= self.total_files:
+                self._log(f"✓ 全部 {self.total_files} 个文件接收完成！")
+        else:
+            self._log(f"已保存文件：{target}")
+
         if (
             self.expected_total is not None
             and self.completed_total >= self.expected_total

@@ -9,7 +9,7 @@ import threading
 import time
 import zlib
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 from typing import List, Optional, Set, Tuple
 import tkinter as tk
 
@@ -95,11 +95,26 @@ class Decoder:
         self._completed_files: Set[Tuple[int, int, bytes]] = set()
         self.file_index = 1
         self.last_status = ""
+        # 多文件进度跟踪
+        self.total_files: int = 0  # 总文件数（从 header 解析）
+        self.received_files: int = 0  # 已接收文件数
+        self.current_filename: str = ""  # 当前正在接收的文件名
+        self.saved_files: List[str] = []  # 已保存的文件列表
 
     def reset(self):
+        """重置当前文件的接收状态，但保留多文件进度"""
         self.glass = None
         self._seeds = set()
         self.last_status = ""
+        self.current_filename = ""
+
+    def reset_all(self):
+        """完全重置，包括多文件进度"""
+        self.reset()
+        self.total_files = 0
+        self.received_files = 0
+        self.saved_files = []
+        self._completed_files = set()
 
     def feed(self, droplet_str: str) -> Optional[str]:
         """处理一个 droplet，返回保存的文件名或 None"""
@@ -144,6 +159,14 @@ class Decoder:
             return (0, 0, 0)
         return (self.glass.chunksDone(), self.glass.num_chunks, len(self._seeds))
 
+    def get_file_progress(self) -> Tuple[int, int]:
+        """返回 (已接收文件数, 总文件数)"""
+        return (self.received_files, self.total_files)
+
+    def is_all_done(self) -> bool:
+        """判断是否所有文件都已接收完成"""
+        return self.total_files > 0 and self.received_files >= self.total_files
+
     def _assemble_data(self) -> bytes:
         assert self.glass is not None
         chunks = list(self.glass.chunks)
@@ -152,17 +175,35 @@ class Decoder:
         return b"".join(chunks)
 
     def _split_payload(self, data: bytes) -> Tuple[str, bytes]:
+        """解析 payload，格式：文件名|文件编号|总文件数\n数据"""
         idx = data.find(b"\n")
         if idx != -1:
-            raw_name = data[:idx]
+            raw_header = data[:idx]
             payload = data[idx + 1:]
-            name = raw_name.decode("utf-8", errors="ignore").strip()
+            header = raw_header.decode("utf-8", errors="ignore").strip()
+
+            # 解析新格式：文件名|文件编号|总文件数
+            parts = header.split("|")
+            if len(parts) >= 3:
+                name = parts[0]
+                try:
+                    file_index = int(parts[1])
+                    total_files = int(parts[2])
+                    # 更新多文件进度信息
+                    if total_files > 0:
+                        self.total_files = total_files
+                except ValueError:
+                    pass
+            else:
+                # 兼容旧格式：只有文件名
+                name = header
         else:
             payload = data
             name = ""
         if not name:
             name = f"qr_output_{self.file_index}"
         name = Path(name).name
+        self.current_filename = name
         # 自动解压
         payload = self._decompress(payload)
         return name, payload
@@ -184,6 +225,8 @@ class Decoder:
             target = self.output_dir / f"{stem}_{int(time.time())}{suffix}"
         target.write_bytes(payload)
         self.file_index += 1
+        self.received_files += 1
+        self.saved_files.append(str(target))
         return str(target)
 
     def _is_duplicate_file(self, data: bytes) -> bool:
@@ -209,11 +252,12 @@ class ReceiverApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("QR Receiver")
-        self.root.geometry("280x120")
+        self.root.geometry("280x170")
         self.root.resizable(False, False)
 
         # 状态
         self.running = False
+        self.topmost = tk.BooleanVar(value=False)
         self.output_dir = Path("decoded")
         self.decoder: Optional[Decoder] = None
         self.worker_thread: Optional[threading.Thread] = None
@@ -242,7 +286,26 @@ class ReceiverApp:
         self.btn_folder = tk.Button(toolbar, text="📁 目录", width=btn_width, command=self._on_select_folder)
         self.btn_folder.pack(side=tk.LEFT, padx=2)
 
-        # 进度条
+        # 置顶复选框
+        topmost_frame = tk.Frame(self.root)
+        topmost_frame.pack(fill=tk.X, padx=10, pady=2)
+
+        self.chk_topmost = tk.Checkbutton(
+            topmost_frame,
+            text="窗口置顶",
+            variable=self.topmost,
+            command=self._on_topmost_changed
+        )
+        self.chk_topmost.pack(side=tk.LEFT)
+
+        # 文件进度标签
+        file_progress_frame = tk.Frame(self.root)
+        file_progress_frame.pack(fill=tk.X, padx=10, pady=2)
+
+        self.file_progress_label = tk.Label(file_progress_frame, text="文件: 0/0", anchor="w")
+        self.file_progress_label.pack(side=tk.LEFT)
+
+        # 进度条（当前文件块进度）
         progress_frame = tk.Frame(self.root)
         progress_frame.pack(fill=tk.X, padx=10, pady=5)
 
@@ -262,6 +325,13 @@ class ReceiverApp:
 
     def _update_status(self, text: str):
         self.status_label.config(text=text)
+
+    def _update_file_progress(self, received: int, total: int):
+        """更新文件进度显示"""
+        if total > 0:
+            self.file_progress_label.config(text=f"文件: {received}/{total}")
+        else:
+            self.file_progress_label.config(text="文件: 0/0")
 
     def _update_progress(self, done: int, total: int, received: int):
         if total <= 0:
@@ -316,9 +386,10 @@ class ReceiverApp:
 
     def _on_restart(self):
         if self.decoder:
-            self.decoder.reset()
+            self.decoder.reset_all()
         self._update_status("已重置，等待新的传输...")
         self._update_progress(0, 0, 0)
+        self._update_file_progress(0, 0)
 
     def _on_select_folder(self):
         folder = filedialog.askdirectory(initialdir=str(self.output_dir), title="选择接收文件目录")
@@ -326,15 +397,27 @@ class ReceiverApp:
             self.output_dir = Path(folder)
             self.dir_label.config(text=f"📁 {self.output_dir.name}")
 
+    def _on_topmost_changed(self):
+        """切换窗口置顶状态"""
+        self.root.attributes("-topmost", self.topmost.get())
+
     def _poll_progress(self):
         if not self.running:
             return
 
         if self.decoder:
             done, total, received = self.decoder.get_progress()
+            file_received, file_total = self.decoder.get_file_progress()
+
+            # 更新文件进度
+            self._update_file_progress(file_received, file_total)
+
             if total > 0:
-                self._update_status(f"接收中...")
+                current_file = self.decoder.current_filename or "未知"
+                self._update_status(f"接收中: {current_file}")
                 self._update_progress(done, total, received)
+            elif file_received > 0 and self.decoder.is_all_done():
+                self._update_status(f"全部完成！共 {file_received} 个文件")
 
         self.root.after(100, self._poll_progress)
 
@@ -388,9 +471,18 @@ class ReceiverApp:
                     time.sleep(0.1)
 
     def _on_file_saved(self, path: str):
-        self._update_status(f"已保存: {Path(path).name}")
+        """文件保存后的回调，不再弹窗，仅更新状态"""
+        filename = Path(path).name
+        if self.decoder:
+            file_received, file_total = self.decoder.get_file_progress()
+            if file_total > 0:
+                self._update_status(f"已保存 [{file_received}/{file_total}]: {filename}")
+            else:
+                self._update_status(f"已保存: {filename}")
+            self._update_file_progress(file_received, file_total)
+        else:
+            self._update_status(f"已保存: {filename}")
         self._update_progress(0, 0, 0)
-        messagebox.showinfo("文件已保存", f"文件已保存到:\n{path}")
 
     def run(self):
         self.root.mainloop()

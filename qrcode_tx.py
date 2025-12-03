@@ -350,13 +350,14 @@ def main():
 
     # 准备所有文件的 fountain
     fountains: List[Tuple[Fountain, str]] = []
-    for file_path in files:
+    total_files = len(files)
+    for file_idx, file_path in enumerate(files, start=1):
         data, compress_info = prepare_file_data(file_path, args.no_compress)
-        payload = build_payload(file_path.name, data)
+        payload = build_payload(file_path.name, data, file_idx, total_files)
         fountain = Fountain(payload, chunk_size=args.chunk_size)
 
         original_size = file_path.stat().st_size
-        print(f"文件 {file_path.name} 大小 {original_size} 字节{compress_info}，分块数 {fountain.num_chunks}")
+        print(f"[{file_idx}/{total_files}] {file_path.name} 大小 {original_size} 字节{compress_info}，分块数 {fountain.num_chunks}")
 
         fountains.append((fountain, file_path.name))
 
@@ -389,8 +390,9 @@ def main():
         display_sequence(display_entries, args.display_interval)
 
 
-def build_payload(name: str, body: bytes) -> bytes:
-    header = name.encode("utf-8") + b"\n"
+def build_payload(name: str, body: bytes, file_index: int = 1, total_files: int = 1) -> bytes:
+    """构建 payload，格式：文件名|文件编号|总文件数\n数据"""
+    header = f"{name}|{file_index}|{total_files}\n".encode("utf-8")
     return header + body
 
 
