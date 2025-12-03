@@ -1,11 +1,26 @@
-*.exe
+# Python
 __pycache__/
-.claude/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# 项目输出
 decoded/
 droplets/
-server.py
-*.txt
 offline_packages/
-!requirements.txt
-venv/
+
+# IDE
+.claude/
+.vscode/
+.idea/
+
+# 其他
+*.exe
 *.zip
+cfg.cache
