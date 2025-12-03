@@ -1,5 +1,7 @@
 import argparse
+import queue
 import sys
+import threading
 import time
 import zlib
 from dataclasses import dataclass
@@ -10,7 +12,7 @@ import cv2
 import numpy as np
 from mss import mss
 
-from FF import Glass, str2Droplet
+from fountain import Glass, str2Droplet
 
 MANIFEST_FILENAME = "__FILE_COUNT__"
 # 压缩标记前缀（与 TX 保持一致）
@@ -137,8 +139,8 @@ def parse_args() -> argparse.Namespace:
         "--interval",
         "-i",
         type=float,
-        default=0.05,
-        help="每次截屏之间的间隔秒数（默认 0.05）。",
+        default=0.02,
+        help="每次截屏之间的间隔秒数（默认 0.02）。",
     )
     parser.add_argument(
         "--dedup",
@@ -174,6 +176,45 @@ def capture_frame(sct: mss, region: CaptureRegion) -> np.ndarray:
     frame = np.array(raw)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
     return gray
+
+
+class ScreenCapture:
+    """多线程截屏，始终获取最新帧"""
+
+    def __init__(self, region: CaptureRegion, max_queue_size: int = 2):
+        self.region = region
+        self.q: queue.Queue[np.ndarray] = queue.Queue(maxsize=max_queue_size)
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._thread.start()
+
+    def _capture_loop(self):
+        with mss() as sct:
+            while not self._stop_event.is_set():
+                try:
+                    frame = capture_frame(sct, self.region)
+                    # 如果队列满了，丢弃旧帧
+                    if self.q.full():
+                        try:
+                            self.q.get_nowait()
+                        except queue.Empty:
+                            pass
+                    self.q.put(frame)
+                except Exception:
+                    time.sleep(0.01)
+
+    def read(self, timeout: float = 1.0) -> Optional[np.ndarray]:
+        try:
+            return self.q.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def update_region(self, region: CaptureRegion):
+        self.region = region
+
+    def stop(self):
+        self._stop_event.set()
+        self._thread.join(timeout=1.0)
 
 
 def extract_seed(droplet: str) -> Optional[int]:
@@ -426,6 +467,8 @@ def main():
             verbose=not args.quiet,
             debug=args.debug
         )
+
+    screen_cap: Optional[ScreenCapture] = None
     try:
         with mss() as sct:
             monitors = sct.monitors
@@ -448,26 +491,35 @@ def main():
                         file=sys.stderr,
                     )
             lookup_region = active_region or monitor_region
-            while True:
+
+            # 初始阶段使用同步截屏来定位二维码
+            while auto_region_enabled and active_region is None:
                 gray = capture_frame(sct, lookup_region)
                 detections = decode_with_fallback(gray)
-                if auto_region_enabled and active_region is None:
-                    target_detection = next(
-                        (d for d in detections if d[1] is not None), None
-                    )
-                    if target_detection:
-                        rect = expand_rect(target_detection[1], lookup_region)
-                        active_region = rect.clamp(monitors[monitor_index])
-                        lookup_region = active_region
-                        auto_region_enabled = False
-                        if not args.quiet:
-                            print(
-                                f"已定位二维码区域 ({active_region.width}x{active_region.height})",
-                                file=sys.stderr,
-                            )
-                    else:
-                        time.sleep(args.interval)
-                        continue
+                target_detection = next(
+                    (d for d in detections if d[1] is not None), None
+                )
+                if target_detection:
+                    rect = expand_rect(target_detection[1], lookup_region)
+                    active_region = rect.clamp(monitors[monitor_index])
+                    lookup_region = active_region
+                    auto_region_enabled = False
+                    if not args.quiet:
+                        print(
+                            f"已定位二维码区域 ({active_region.width}x{active_region.height})",
+                            file=sys.stderr,
+                        )
+                else:
+                    time.sleep(args.interval)
+
+            # 定位完成后启动多线程截屏
+            screen_cap = ScreenCapture(lookup_region)
+
+            while True:
+                gray = screen_cap.read(timeout=1.0)
+                if gray is None:
+                    continue
+                detections = decode_with_fallback(gray)
                 detected_valid = False
                 for barcode, _ in detections:
                     barcode = barcode.strip()
@@ -492,6 +544,9 @@ def main():
     except KeyboardInterrupt:
         if not args.quiet:
             print("\n用户中断，退出。", file=sys.stderr)
+    finally:
+        if screen_cap:
+            screen_cap.stop()
 
 
 if __name__ == "__main__":

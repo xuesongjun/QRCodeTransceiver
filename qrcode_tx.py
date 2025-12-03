@@ -7,7 +7,7 @@ from typing import List, Tuple
 import qrcode
 from PIL import Image
 
-from FF import Fountain
+from fountain import Fountain
 
 # 压缩标记前缀
 COMPRESS_MAGIC = b"ZLIB:"
@@ -152,8 +152,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=1024,
-        help="Fountain chunk 大小，默认 1024 字节。",
+        default=512,
+        help="Fountain chunk 大小，默认 512 字节。",
     )
     parser.add_argument(
         "--extra",
@@ -164,8 +164,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--size",
         type=int,
-        default=512,
-        help="输出二维码图片边长（默认 512 像素）。",
+        default=800,
+        help="输出二维码图片边长（默认 800 像素）。",
     )
     parser.add_argument(
         "--border",
@@ -177,9 +177,9 @@ def parse_args() -> argparse.Namespace:
         "-i",
         "--interval",
         type=int,
-        default=100,
+        default=50,
         dest="display_interval",
-        help="播放间隔毫秒数（默认 100，即每秒 10 帧）。",
+        help="播放间隔毫秒数（默认 50，即每秒 20 帧）。",
     )
     parser.add_argument(
         "--no-display",
@@ -187,9 +187,9 @@ def parse_args() -> argparse.Namespace:
         help="仅生成图片，不弹出轮播窗口。",
     )
     parser.add_argument(
-        "--live",
+        "--no-live",
         action="store_true",
-        help="实时模式：不断生成新的 droplet，而不是循环播放固定的包。",
+        help="禁用实时模式，使用预生成模式循环播放固定的包。",
     )
     parser.add_argument(
         "--no-compress",
@@ -224,8 +224,8 @@ def main():
     fountain = Fountain(payload, chunk_size=args.chunk_size)
     total_chunks = fountain.num_chunks
 
-    # 实时模式：直接开始播放，不预生成
-    if args.live and not args.no_display:
+    # 实时模式（默认）：直接开始播放，不预生成
+    if not args.no_live and not args.no_display:
         print(
             f"文件 {input_path.name} 大小 {original_size} 字节{compress_info}，"
             f"分块数 {total_chunks}，实时模式启动。"

@@ -5,3 +5,7 @@ decoded/
 droplets/
 server.py
 *.txt
+offline_packages/
+!requirements.txt
+venv/
+*.zip

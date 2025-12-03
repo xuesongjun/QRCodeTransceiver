@@ -1,0 +1,9 @@
+# 核心依赖
+opencv-python>=4.5.0
+numpy>=1.20.0
+mss>=6.0.0
+qrcode>=7.0
+Pillow>=8.0.0
+
+# 可选：更快的 QR 解码器（需要系统安装 zbar 库）
+# pyzbar>=0.1.9
