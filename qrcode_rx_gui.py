@@ -87,9 +87,10 @@ def validate_droplet(droplet_str: str, expected_num_chunks: Optional[int] = None
 class Decoder:
     """喷泉码解码器"""
 
-    def __init__(self, output_dir: Path):
+    def __init__(self, output_dir: Path, overwrite_existing: bool = False):
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.overwrite_existing = overwrite_existing
         self.glass: Optional[Glass] = None
         self._seeds: Set[int] = set()
         self._completed_files: Set[Tuple[int, int, bytes]] = set()
@@ -219,10 +220,14 @@ class Decoder:
 
     def _write_file(self, filename: str, payload: bytes) -> str:
         target = self.output_dir / filename
-        if target.exists():
+        if target.exists() and not self.overwrite_existing:
             stem = target.stem
             suffix = target.suffix
-            target = self.output_dir / f"{stem}_{int(time.time())}{suffix}"
+            while True:
+                candidate = self.output_dir / f"{stem}_{time.time_ns()}{suffix}"
+                if not candidate.exists():
+                    target = candidate
+                    break
         target.write_bytes(payload)
         self.file_index += 1
         self.received_files += 1
@@ -258,6 +263,7 @@ class ReceiverApp:
         # 状态
         self.running = False
         self.topmost = tk.BooleanVar(value=False)
+        self.overwrite_existing = tk.BooleanVar(value=False)
         self.output_dir = Path("decoded")
         self.decoder: Optional[Decoder] = None
         self.worker_thread: Optional[threading.Thread] = None
@@ -297,6 +303,14 @@ class ReceiverApp:
             command=self._on_topmost_changed
         )
         self.chk_topmost.pack(side=tk.LEFT)
+
+        self.chk_overwrite = tk.Checkbutton(
+            topmost_frame,
+            text="同名覆写",
+            variable=self.overwrite_existing,
+            command=self._on_overwrite_changed
+        )
+        self.chk_overwrite.pack(side=tk.LEFT, padx=(10, 0))
 
         # 文件进度标签
         file_progress_frame = tk.Frame(self.root)
@@ -359,7 +373,7 @@ class ReceiverApp:
 
         self.running = True
         self.stop_event.clear()
-        self.decoder = Decoder(self.output_dir)
+        self.decoder = Decoder(self.output_dir, overwrite_existing=self.overwrite_existing.get())
 
         self.btn_start.config(state=tk.DISABLED)
         self.btn_stop.config(state=tk.NORMAL)
@@ -400,6 +414,10 @@ class ReceiverApp:
     def _on_topmost_changed(self):
         """切换窗口置顶状态"""
         self.root.attributes("-topmost", self.topmost.get())
+
+    def _on_overwrite_changed(self):
+        if self.decoder:
+            self.decoder.overwrite_existing = self.overwrite_existing.get()
 
     def _poll_progress(self):
         if not self.running:
