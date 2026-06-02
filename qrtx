@@ -1,29 +1,28 @@
 #!/usr/bin/csh -f
 
-# 1. 记录当前执行命令的目录
-# C Shell 的 $cwd 变量存储当前工作目录。
-set ORIGINAL_CWD = $cwd
+set SCRIPT_PATH = "$0"
+set SCRIPT_DIR = `dirname "$SCRIPT_PATH"`
+set SCRIPT_DIR = `cd "$SCRIPT_DIR"; pwd`
 
-# 需要提前把qrcode_transceiver目录添加到Linux系统的环境变量中，方便在任何目录下执行qrtx命令。
-# 2. 设置项目根目录
-set PROJECT_ROOT = "~/local/qrcode_transceiver" 
+if ( $?QRTX_ROOT ) then
+    set PROJECT_ROOT = "$QRTX_ROOT"
+else
+    set PROJECT_ROOT = "$SCRIPT_DIR"
+endif
 
-# 3. 切换到项目目录（为了激活 venv）
-cd $PROJECT_ROOT
+if ( -x "$PROJECT_ROOT/venv/bin/python" ) then
+    set PYTHON_BIN = "$PROJECT_ROOT/venv/bin/python"
+else if ( $?PYTHON ) then
+    set PYTHON_BIN = "$PYTHON"
+else
+    set PYTHON_BIN = `which python3`
+    if ( "$PYTHON_BIN" == "" ) then
+        set PYTHON_BIN = `which python`
+    endif
+    if ( "$PYTHON_BIN" == "" ) then
+        echo "Error: python3/python not found in PATH." >&2
+        exit 1
+    endif
+endif
 
-# 定义 prompt 变量，避免 activate.csh 报错
-if (! $?prompt) set prompt = ""
-
-# 4. 激活虚拟环境
-source $PROJECT_ROOT/venv/bin/activate.csh
-
-# --- 关键步骤：切换回原始目录 ---
-# 5. 切换回用户执行命令的目录
-cd $ORIGINAL_CWD
-
-# 6. 运行 Python 脚本，并传递所有参数 ($argv)
-# Python 现在会在 $ORIGINAL_CWD 中查找文件
-python $PROJECT_ROOT/qrcode_tx.py $argv
-
-# 7. 可选：停用虚拟环境 
-deactivate
+exec "$PYTHON_BIN" "$PROJECT_ROOT/qrcode_tx.py" $argv

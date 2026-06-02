@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 import qrcode
+from qrcode.exceptions import DataOverflowError
 from PIL import Image
 
 from fountain import Fountain
@@ -13,16 +14,34 @@ from fountain import Fountain
 # 压缩标记前缀
 COMPRESS_MAGIC = b"ZLIB:"
 
+ERROR_CORRECTION_LEVELS = {
+    "L": qrcode.constants.ERROR_CORRECT_L,
+    "M": qrcode.constants.ERROR_CORRECT_M,
+    "Q": qrcode.constants.ERROR_CORRECT_Q,
+    "H": qrcode.constants.ERROR_CORRECT_H,
+}
 
-def build_qr(droplet: str, size: int = 512, border: int = 4) -> Image.Image:
+
+def build_qr(
+    droplet: str,
+    size: int = 512,
+    border: int = 4,
+    error_correction: int = qrcode.constants.ERROR_CORRECT_M,
+) -> Image.Image:
     qr = qrcode.QRCode(
         version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_Q,
+        error_correction=error_correction,
         box_size=10,
         border=border,
     )
     qr.add_data(droplet)
-    qr.make(fit=True)
+    try:
+        qr.make(fit=True)
+    except DataOverflowError as exc:
+        raise ValueError(
+            "当前 QR 参数无法容纳单个 droplet，请降低 --chunk-size "
+            "或降低 --error-correction。"
+        ) from exc
     base_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
     if size:
         # 将二维码缩放到指定尺寸
@@ -87,7 +106,14 @@ def display_sequence(entries: List[Tuple[str, str, Image.Image]], interval_ms: i
     root.mainloop()
 
 
-def display_live(fountain: Fountain, filename: str, size: int, border: int, interval_ms: int):
+def display_live(
+    fountain: Fountain,
+    filename: str,
+    size: int,
+    border: int,
+    interval_ms: int,
+    error_correction: int,
+):
     """实时生成新 droplet 并显示（不循环固定的包）"""
     import tkinter as tk
     from PIL import ImageTk
@@ -123,7 +149,12 @@ def display_live(fountain: Fountain, filename: str, size: int, border: int, inte
     def update():
         # 生成新的 droplet
         droplet_str = fountain.droplet().getStr()
-        img = build_qr(droplet_str, size=size, border=border)
+        img = build_qr(
+            droplet_str,
+            size=size,
+            border=border,
+            error_correction=error_correction,
+        )
         state["tk_img"] = ImageTk.PhotoImage(img)
         state["count"] += 1
 
@@ -164,8 +195,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=512,
-        help="Fountain chunk 大小，默认 512 字节。",
+        default=1024,
+        help="Fountain chunk 大小，默认 1024 字节。",
     )
     parser.add_argument(
         "--extra",
@@ -189,9 +220,15 @@ def parse_args() -> argparse.Namespace:
         "-i",
         "--interval",
         type=int,
-        default=50,
+        default=30,
         dest="display_interval",
-        help="播放间隔毫秒数（默认 50，即每秒 20 帧）。",
+        help="播放间隔毫秒数（默认 30，即约每秒 33 帧）。",
+    )
+    parser.add_argument(
+        "--error-correction",
+        choices=sorted(ERROR_CORRECTION_LEVELS),
+        default="M",
+        help="QR 纠错等级，L/M/Q/H，等级越高越稳但容量越低（默认 M）。",
     )
     parser.add_argument(
         "--no-display",
@@ -278,7 +315,13 @@ def prepare_file_data(file_path: Path, no_compress: bool) -> Tuple[bytes, str]:
     return data, compress_info
 
 
-def display_live_multi(fountains: List[Tuple[Fountain, str]], size: int, border: int, interval_ms: int):
+def display_live_multi(
+    fountains: List[Tuple[Fountain, str]],
+    size: int,
+    border: int,
+    interval_ms: int,
+    error_correction: int,
+):
     """实时生成多文件的 droplet 并循环显示"""
     import tkinter as tk
     from PIL import ImageTk
@@ -309,7 +352,12 @@ def display_live_multi(fountains: List[Tuple[Fountain, str]], size: int, border:
         fountain, filename = fountains[file_idx]
 
         droplet_str = fountain.droplet().getStr()
-        img = build_qr(droplet_str, size=size, border=border)
+        img = build_qr(
+            droplet_str,
+            size=size,
+            border=border,
+            error_correction=error_correction,
+        )
         state["tk_img"] = ImageTk.PhotoImage(img)
         state["count"] += 1
 
@@ -347,6 +395,7 @@ def main():
     for f in files:
         print(f"  - {f.name}")
     print()
+    error_correction = ERROR_CORRECTION_LEVELS[args.error_correction]
 
     # 准备所有文件的 fountain
     fountains: List[Tuple[Fountain, str]] = []
@@ -365,7 +414,13 @@ def main():
     if not args.no_live and not args.no_display:
         print()
         print("实时模式启动，循环播放所有文件...")
-        display_live_multi(fountains, args.size, args.border, args.display_interval)
+        display_live_multi(
+            fountains,
+            args.size,
+            args.border,
+            args.display_interval,
+            error_correction,
+        )
         return
 
     # 预生成模式
@@ -380,7 +435,12 @@ def main():
 
         for idx in range(total_droplets):
             droplet = fountain.droplet().getStr()
-            img = build_qr(droplet, size=args.size, border=args.border)
+            img = build_qr(
+                droplet,
+                size=args.size,
+                border=args.border,
+                error_correction=error_correction,
+            )
             img.save(out_dir / f"{filename}_droplet_{idx+1:05d}.png")
             if not args.no_display:
                 display_entries.append((filename, droplet, img.copy()))

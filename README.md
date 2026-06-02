@@ -79,6 +79,14 @@ python qrcode_rx.py
 python qrcode_tx.py <文件路径> [选项]
 ```
 
+Linux 下也可以直接用仓库里的 `qrtx`：
+
+```bash
+./qrtx myfile.zip
+```
+
+如果仓库不在当前目录，可先用 `setenv QRTX_ROOT /path/to/qrcode_transceiver` 指向项目根目录。
+
 #### 参数说明
 
 | 参数 | 说明 | 默认值 |
@@ -86,11 +94,12 @@ python qrcode_tx.py <文件路径> [选项]
 | `filename` | 需要传输的文件路径，支持通配符 | (与 -f 二选一) |
 | `-f, --file-list` | 文件列表文件，每行一个文件路径 | - |
 | `-o, --output` | 二维码图片输出目录 | `droplets` |
-| `--chunk-size` | 每个分块的字节数 | `512` |
+| `--chunk-size` | 每个分块的字节数 | `1024` |
 | `--extra` | 额外生成 droplet 的比例 | `0.5` (50%) |
 | `--size` | 二维码图片边长（像素） | `800` |
 | `--border` | 二维码静区宽度（模块数） | `4` |
-| `-i, --interval` | 播放间隔（毫秒） | `50` |
+| `-i, --interval` | 播放间隔（毫秒） | `30` |
+| `--error-correction` | QR 纠错等级，L/M/Q/H，等级越高越稳但容量越低 | `M` |
 | `--no-display` | 仅生成图片，不弹出播放窗口 | - |
 | `--no-live` | 禁用实时模式，使用预生成模式 | - |
 | `--no-compress` | 禁用自动压缩 | - |
@@ -106,6 +115,9 @@ python qrcode_tx.py bigfile.exe --no-live
 
 # 自定义参数
 python qrcode_tx.py myfile.zip --size 700 -i 100
+
+# 更高吞吐，适合屏幕清晰、识别稳定时使用
+python qrcode_tx.py myfile.zip --chunk-size 1536 -i 20 --error-correction L
 
 # 禁用压缩
 python qrcode_tx.py already_compressed.zip --no-compress
@@ -207,7 +219,7 @@ python build_exe.py
 1. **QR 码大小**：`--size` 参数影响 QR 码的可识别性。太小可能导致识别率下降。
 2. **播放间隔**：`-i` 参数需要根据 RX 的处理能力调整。间隔太短可能导致丢包。
 3. **压缩效果**：对于已压缩的文件（如 .zip, .jpg），压缩可能无效，会自动跳过。
-4. **大文件传输**：默认使用实时模式，适当增大 `--size` 和 `-i` 参数可提高稳定性。
+4. **大文件传输**：默认使用实时模式和较高吞吐参数。若识别不稳定，可增大 `--size`/`-i`，或把 `--error-correction` 调回 `Q`。
 
 ## License
 

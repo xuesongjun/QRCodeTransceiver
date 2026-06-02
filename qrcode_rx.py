@@ -27,7 +27,7 @@ DECODER_NAME = None
 try:
     import pyzbar.pyzbar as pyzbar
 
-    def qrdecode(image: np.ndarray) -> List[Detection]:
+    def qrdecode(image: np.ndarray, multi: bool = False) -> List[Detection]:
         detections: List[Detection] = []
         for obj in pyzbar.decode(image):
             rect = obj.rect
@@ -44,38 +44,38 @@ except (ModuleNotFoundError, Exception):
 if DECODER_NAME is None:
     qrDecoder = cv2.QRCodeDetector()
 
-    def qrdecode(image: np.ndarray) -> List[Detection]:
+    def _rect_from_points(points: Optional[np.ndarray]) -> Optional[Tuple[int, int, int, int]]:
+        if points is None or points.size == 0:
+            return None
+        pts = points.reshape(-1, 2)
+        xs = pts[:, 0]
+        ys = pts[:, 1]
+        left = int(xs.min())
+        top = int(ys.min())
+        right = int(xs.max())
+        bottom = int(ys.max())
+        return (left, top, right - left, bottom - top)
+
+    def qrdecode(image: np.ndarray, multi: bool = False) -> List[Detection]:
         detections: List[Detection] = []
+        if multi:
+            try:
+                retval, decoded_infos, points, _ = qrDecoder.detectAndDecodeMulti(image)
+            except cv2.error:
+                retval = False
+            if retval:
+                for data, pts in zip(decoded_infos, points):
+                    if data:
+                        detections.append((data, _rect_from_points(pts)))
+                return detections
+
         try:
-            retval, decoded_infos, points, _ = qrDecoder.detectAndDecodeMulti(image)
-        except cv2.error:
-            retval = False
-        if retval:
-            for data, pts in zip(decoded_infos, points):
-                if not data:
-                    continue
-                xs = pts[:, 0]
-                ys = pts[:, 1]
-                left = int(xs.min())
-                top = int(ys.min())
-                right = int(xs.max())
-                bottom = int(ys.max())
-                detections.append(
-                    (data, (left, top, right - left, bottom - top))
-                )
-        else:
             data, points, _ = qrDecoder.detectAndDecode(image)
-            if data:
-                rect = None
-                if points is not None and points.size > 0:
-                    xs = points[:, 0]
-                    ys = points[:, 1]
-                    left = int(xs.min())
-                    top = int(ys.min())
-                    right = int(xs.max())
-                    bottom = int(ys.max())
-                    rect = (left, top, right - left, bottom - top)
-                detections.append((data, rect))
+        except cv2.error:
+            data = ""
+            points = None
+        if data:
+            detections.append((data, _rect_from_points(points)))
         return detections
 
     DECODER_NAME = "opencv"
@@ -239,8 +239,8 @@ def validate_droplet(droplet_str: str, expected_num_chunks: Optional[int] = None
         # num_chunks 上限约 500MB 文件 (500*1024*1024/512 ≈ 1000000)
         if num_chunks > 1000000:
             return False
-        # padding 不应该超过 chunk_size（通常是 512）
-        if padding > 1024:
+        # padding 不应该超过发送端 chunk_size；保留上限避免异常数据。
+        if padding > 4096:
             return False
         # 如果已有期望的 num_chunks，检查是否一致
         if expected_num_chunks is not None and num_chunks != expected_num_chunks:
@@ -266,12 +266,12 @@ def expand_rect(
     return CaptureRegion(left=new_left, top=new_top, width=new_width, height=new_height)
 
 
-def decode_with_fallback(image: np.ndarray) -> List[Detection]:
-    detections = qrdecode(image)
+def decode_with_fallback(image: np.ndarray, multi: bool = False) -> List[Detection]:
+    detections = qrdecode(image, multi=multi)
     if detections:
         return detections
     inverted = cv2.bitwise_not(image)
-    return qrdecode(inverted)
+    return qrdecode(inverted, multi=multi)
 
 
 def make_progress_bar(done: int, total: int, width: int = 30) -> str:
@@ -532,7 +532,7 @@ def main():
             # 初始阶段使用同步截屏来定位二维码
             while auto_region_enabled and active_region is None:
                 gray = capture_frame(sct, lookup_region)
-                detections = decode_with_fallback(gray)
+                detections = decode_with_fallback(gray, multi=True)
                 target_detection = next(
                     (d for d in detections if d[1] is not None), None
                 )

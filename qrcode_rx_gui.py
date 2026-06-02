@@ -28,53 +28,70 @@ Detection = Tuple[str, Optional[Tuple[int, int, int, int]]]
 qrDecoder = cv2.QRCodeDetector()
 
 
-def qrdecode(image: np.ndarray) -> List[Detection]:
+def _rect_from_points(points: Optional[np.ndarray]) -> Optional[Tuple[int, int, int, int]]:
+    if points is None or points.size == 0:
+        return None
+    pts = points.reshape(-1, 2)
+    xs = pts[:, 0]
+    ys = pts[:, 1]
+    left = int(xs.min())
+    top = int(ys.min())
+    right = int(xs.max())
+    bottom = int(ys.max())
+    return (left, top, right - left, bottom - top)
+
+
+def qrdecode(image: np.ndarray, multi: bool = False) -> List[Detection]:
     detections: List[Detection] = []
+    if multi:
+        try:
+            retval, decoded_infos, points, _ = qrDecoder.detectAndDecodeMulti(image)
+        except cv2.error:
+            retval = False
+        if retval:
+            for data, pts in zip(decoded_infos, points):
+                if data:
+                    detections.append((data, _rect_from_points(pts)))
+            return detections
+
     try:
-        retval, decoded_infos, points, _ = qrDecoder.detectAndDecodeMulti(image)
-    except cv2.error:
-        retval = False
-    if retval:
-        for data, pts in zip(decoded_infos, points):
-            if not data:
-                continue
-            xs = pts[:, 0]
-            ys = pts[:, 1]
-            left = int(xs.min())
-            top = int(ys.min())
-            right = int(xs.max())
-            bottom = int(ys.max())
-            detections.append((data, (left, top, right - left, bottom - top)))
-    else:
         data, points, _ = qrDecoder.detectAndDecode(image)
-        if data:
-            detections.append((data, None))
+    except cv2.error:
+        data = ""
+        points = None
+    if data:
+        detections.append((data, _rect_from_points(points)))
     return detections
 
 
-def decode_with_fallback(image: np.ndarray) -> List[Detection]:
-    detections = qrdecode(image)
+def decode_with_fallback(image: np.ndarray, multi: bool = False) -> List[Detection]:
+    detections = qrdecode(image, multi=multi)
     if detections:
         return detections
     inverted = cv2.bitwise_not(image)
-    return qrdecode(inverted)
+    return qrdecode(inverted, multi=multi)
+
+
+def is_plausible_droplet(droplet_str: str) -> bool:
+    parts = droplet_str.split("|", 3)
+    if len(parts) != 4:
+        return False
+    try:
+        seed = int(parts[0])
+        num_chunks = int(parts[1])
+        padding = int(parts[2])
+    except ValueError:
+        return False
+    return seed >= 0 and 0 < num_chunks <= 1000000 and 0 <= padding <= 4096
 
 
 def validate_droplet(droplet_str: str, expected_num_chunks: Optional[int] = None) -> bool:
     """验证 droplet 字符串格式是否正确"""
+    if not is_plausible_droplet(droplet_str):
+        return False
     try:
         parts = droplet_str.split("|", 3)
-        if len(parts) != 4:
-            return False
-        seed = int(parts[0])
         num_chunks = int(parts[1])
-        padding = int(parts[2])
-        if seed < 0 or num_chunks <= 0 or padding < 0:
-            return False
-        if num_chunks > 1000000:
-            return False
-        if padding > 1024:
-            return False
         if expected_num_chunks is not None and num_chunks != expected_num_chunks:
             return False
         import base64
@@ -459,8 +476,9 @@ class ReceiverApp:
                     frame = np.array(raw)
                     gray = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
 
-                    # 解码
-                    detections = decode_with_fallback(gray)
+                    # 全屏定位阶段允许多码检测；定位后只跑单码快路径。
+                    is_full_screen = region["width"] == monitor["width"]
+                    detections = decode_with_fallback(gray, multi=is_full_screen)
 
                     for barcode, rect in detections:
                         barcode = barcode.strip()
