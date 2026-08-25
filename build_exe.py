@@ -13,7 +13,7 @@ def main():
     main_script = script_dir / "qrcode_rx_gui.py"
 
     if not main_script.exists():
-        print(f"错误：找不到 {main_script}")
+        print(f"错误: 找不到 {main_script}")
         sys.exit(1)
 
     # 检查 pyinstaller
@@ -42,7 +42,7 @@ def main():
         print("=" * 50)
         print("打包完成！")
         print("=" * 50)
-        print(f"exe 文件：{exe_path}")
+        print(f"exe 文件: {exe_path}")
     else:
         print("打包可能失败，请检查输出")
 

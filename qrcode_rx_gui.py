@@ -1,6 +1,35 @@
 #!/usr/bin/env python3
 """
-QR Code Receiver GUI - 二维码喷泉码接收端图形界面
+qrcode_rx_gui.py — 二维码喷泉码接收端 (GUI 版)
+
+功能概述
+--------
+提供图形界面的 QR 喷泉码接收端，可打包为独立 exe，
+在没有 Python 环境的机器上直接运行.
+
+快速使用
+--------
+  # 直接运行
+  python qrcode_rx_gui.py
+
+  # 打包为独立 exe
+  python build_exe.py
+  # 生成的 exe 位于 dist/QRReceiver.exe
+
+界面说明
+--------
+  ▶ 开始  — 开始截屏并识别二维码
+  ⏹ 停止  — 停止接收
+  🔄 重置  — 清除当前接收状态，准备接收新一批文件
+  📁 目录  — 选择文件保存目录 (默认 decoded/)
+  窗口置顶 — 勾选后窗口浮于最前，方便对准发送端屏幕
+  同名覆写 — 勾选后收到同名文件直接覆盖，否则加时间戳后缀
+
+与命令行版 (qrcode_rx.py) 的差异
+---------------------------------
+  - 仅使用 OpenCV 解码器 (不依赖 pyzbar)
+  - 自动缩小截屏区域 (检测到 QR 后锁定坐标)
+  - 所有截屏和译码在后台线程中进行，GUI 线程只负责刷新进度
 """
 
 import queue
@@ -102,7 +131,22 @@ def validate_droplet(droplet_str: str, expected_num_chunks: Optional[int] = None
 
 
 class Decoder:
-    """喷泉码解码器"""
+    """
+    喷泉码解码器 (GUI 版，无终端输出，仅返回状态供 UI 轮询) .
+
+    与命令行版 DropletAutoSaver 的主要区别
+    ---------------------------------------
+    - feed() 返回保存路径字符串而非布尔值，方便 UI 展示文件名
+    - 提供 get_progress() / get_file_progress() / is_all_done() 供 GUI 轮询
+    - 支持 overwrite_existing 开关 (对应"同名覆写"复选框)
+    - reset() 只清当前文件状态，reset_all() 清全部 (含多文件进度)
+
+    用法
+    ----
+    decoder = Decoder(Path("decoded"), overwrite_existing=False)
+    saved_path = decoder.feed(droplet_str)  # None 或文件路径
+    done, total, received = decoder.get_progress()
+    """
 
     def __init__(self, output_dir: Path, overwrite_existing: bool = False):
         self.output_dir = output_dir
@@ -114,20 +158,20 @@ class Decoder:
         self.file_index = 1
         self.last_status = ""
         # 多文件进度跟踪
-        self.total_files: int = 0  # 总文件数（从 header 解析）
+        self.total_files: int = 0  # 总文件数 (从 header 解析)
         self.received_files: int = 0  # 已接收文件数
         self.current_filename: str = ""  # 当前正在接收的文件名
         self.saved_files: List[str] = []  # 已保存的文件列表
 
     def reset(self):
-        """重置当前文件的接收状态，但保留多文件进度"""
+        """重置当前文件的接收状态 (Glass + seed 集合) ，但保留多文件进度计数."""
         self.glass = None
         self._seeds = set()
         self.last_status = ""
         self.current_filename = ""
 
     def reset_all(self):
-        """完全重置，包括多文件进度"""
+        """完全重置，包括多文件进度、已保存列表和去重记录.对应 UI 的"重置"按钮."""
         self.reset()
         self.total_files = 0
         self.received_files = 0
@@ -135,7 +179,12 @@ class Decoder:
         self._completed_files = set()
 
     def feed(self, droplet_str: str) -> Optional[str]:
-        """处理一个 droplet，返回保存的文件名或 None"""
+        """
+        处理一个 droplet，返回保存的文件绝对路径，或 None (未完成/重复/无效) .
+
+        调用方 (_worker_loop) 收到非 None 返回值时，
+        通过 root.after() 在主线程触发 _on_file_saved 更新 UI.
+        """
         expected = self.glass.num_chunks if self.glass else None
         if not validate_droplet(droplet_str, expected):
             return None
@@ -193,14 +242,14 @@ class Decoder:
         return b"".join(chunks)
 
     def _split_payload(self, data: bytes) -> Tuple[str, bytes]:
-        """解析 payload，格式：文件名|文件编号|总文件数\n数据"""
+        """解析 payload，格式: 文件名|文件编号|总文件数\n数据"""
         idx = data.find(b"\n")
         if idx != -1:
             raw_header = data[:idx]
             payload = data[idx + 1:]
             header = raw_header.decode("utf-8", errors="ignore").strip()
 
-            # 解析新格式：文件名|文件编号|总文件数
+            # 解析新格式: 文件名|文件编号|总文件数
             parts = header.split("|")
             if len(parts) >= 3:
                 name = parts[0]
@@ -213,7 +262,7 @@ class Decoder:
                 except ValueError:
                     pass
             else:
-                # 兼容旧格式：只有文件名
+                # 兼容旧格式: 只有文件名
                 name = header
         else:
             payload = data
@@ -269,7 +318,21 @@ class Decoder:
 
 
 class ReceiverApp:
-    """接收端 GUI 应用"""
+    """
+    接收端 GUI 主应用类.
+
+    架构
+    ----
+    - 主线程: tkinter 事件循环，负责 UI 渲染和用户交互
+    - 后台线程 (_worker_loop) : 截屏 → 解码 → 喂给 Decoder
+      完成一个文件时通过 root.after(0, ...) 回调到主线程更新 UI
+    - _poll_progress(): 每 100ms 在主线程轮询 Decoder 进度并刷新进度条
+
+    线程安全说明
+    ------------
+    tkinter 不是线程安全的，所有 UI 更新必须在主线程中执行.
+    后台线程只通过 root.after() 向主线程投递回调，不直接修改 UI 控件.
+    """
 
     def __init__(self):
         self.root = tk.Tk()
@@ -336,7 +399,7 @@ class ReceiverApp:
         self.file_progress_label = tk.Label(file_progress_frame, text="文件: 0/0", anchor="w")
         self.file_progress_label.pack(side=tk.LEFT)
 
-        # 进度条（当前文件块进度）
+        # 进度条 (当前文件块进度)
         progress_frame = tk.Frame(self.root)
         progress_frame.pack(fill=tk.X, padx=10, pady=5)
 
@@ -457,7 +520,17 @@ class ReceiverApp:
         self.root.after(100, self._poll_progress)
 
     def _worker_loop(self):
-        """后台工作线程"""
+        """
+        后台截屏与译码线程 (daemon 线程，主线程退出时自动结束) .
+
+        执行流程
+        --------
+        1. 全屏截图，multi=True 检测所有 QR 码
+        2. 发现 QR 后缩小截屏区域 (加 50px padding) ，提升后续帧速度
+        3. 收到有效 droplet 后喂给 decoder
+        4. decoder 完成一个文件时，通过 root.after(0, ...) 在主线程触发回调
+        5. 未检测到 QR 时 sleep 0.02s，避免空转耗 CPU
+        """
         with mss() as sct:
             monitors = sct.monitors
             monitor = monitors[1] if len(monitors) > 1 else monitors[0]
@@ -476,7 +549,7 @@ class ReceiverApp:
                     frame = np.array(raw)
                     gray = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
 
-                    # 全屏定位阶段允许多码检测；定位后只跑单码快路径。
+                    # 全屏定位阶段允许多码检测；定位后只跑单码快路径.
                     is_full_screen = region["width"] == monitor["width"]
                     detections = decode_with_fallback(gray, multi=is_full_screen)
 

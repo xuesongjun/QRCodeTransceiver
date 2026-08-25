@@ -1,9 +1,50 @@
-# 核心依赖
+# ============================================================
+# QR Code Transceiver 依赖列表
+# ============================================================
+#
+# 安装方式 (选一) :
+#
+#   [在线安装]
+#   pip install -r requirements.txt
+#
+#   [使用虚拟环境 (推荐) ]
+#   python -m venv venv
+#   # Windows:
+#   venv\Scripts\activate
+#   # Linux/Mac:
+#   source venv/bin/activate
+#   pip install -r requirements.txt
+#
+#   [离线安装 (Linux 目标机，需先用 download_packages.py 下载) ]
+#   chmod +x install_offline.sh && ./install_offline.sh
+#
+# ============================================================
+
+# --- 核心依赖 (TX + RX 均需要) ---
+
+# OpenCV: 截屏帧的图像处理与 QR 码检测 (cvtColor / QRCodeDetector)
 opencv-python>=4.5.0
+
+# NumPy: 配合 OpenCV 处理像素数组
 numpy>=1.20.0
+
+# mss: 跨平台高性能屏幕截图 (RX 端)
 mss>=6.0.0
+
+# qrcode: 生成二维码图片 (TX 端)
 qrcode>=7.0
+
+# Pillow: 图像处理与 GUI 显示 (TX 端 tkinter 播放器)
 Pillow>=8.0.0
 
-# 打包 exe（可选）
+# --- 可选依赖 ---
+
+# pyzbar: 性能更好的 QR 解码器，优先于 OpenCV 使用 (需另装 zbar 动态库)
+# 安装: pip install pyzbar
+# Linux 额外需要: sudo apt-get install libzbar0
+# Windows 可能需要: 从 https://sourceforge.net/projects/zbar/ 安装 ZBar
+# pyzbar>=0.1.9
+
+# --- 打包为独立 exe (可选) ---
+# 打包命令: python build_exe.py
 # pyinstaller>=6.0.0

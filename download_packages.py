@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 download_packages.py - 离线下载 Python 依赖包
-用法：在有网络的 Windows 机器上运行此脚本，下载 Linux 离线包
+用法: 在有网络的 Windows 机器上运行此脚本，下载 Linux 离线包
 """
 
 import subprocess
@@ -16,7 +16,7 @@ def main():
 
     # 检查 requirements.txt 是否存在
     if not requirements_file.exists():
-        print("错误：找不到 requirements.txt")
+        print("错误: 找不到 requirements.txt")
         sys.exit(1)
 
     # 创建离线包目录
@@ -29,7 +29,7 @@ def main():
     print()
 
     # 询问目标平台
-    print("请选择目标平台：")
+    print("请选择目标平台: ")
     print("1) Linux x86_64 (manylinux)")
     print("2) Linux aarch64/arm64")
     print("3) Windows (当前平台)")
@@ -38,7 +38,7 @@ def main():
 
     # Python 版本选择
     print()
-    print("请选择目标 Python 版本：")
+    print("请选择目标 Python 版本: ")
     print("1) Python 3.8 (推荐，兼容性最好)")
     print("2) Python 3.9")
     print("3) Python 3.10")
@@ -70,7 +70,7 @@ def main():
             subprocess.run(cmd, check=True)
             return True
         except subprocess.CalledProcessError:
-            print(f"警告：部分包下载失败 ({platform})")
+            print(f"警告: 部分包下载失败 ({platform})")
             return False
 
     def download_current_platform():
@@ -105,7 +105,7 @@ def main():
     print(f"共下载 {len(packages)} 个包")
     print(f"离线包目录: {packages_dir}")
     print()
-    print("将以下文件/目录复制到目标 Linux 机器：")
+    print("将以下文件/目录复制到目标 Linux 机器: ")
     print(f"  1. {packages_dir.name}/ 目录")
     print("  2. install_offline.sh 脚本")
     print("  3. requirements.txt")
@@ -117,7 +117,7 @@ def main():
     print()
 
     # 列出下载的包
-    print("已下载的包：")
+    print("已下载的包: ")
     for pkg in sorted(packages):
         size_kb = pkg.stat().st_size / 1024
         if size_kb > 1024:
