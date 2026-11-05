@@ -195,8 +195,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=1024,
-        help="Fountain chunk 大小，默认 1024 字节。",
+        default=512,
+        help="Fountain chunk 大小，默认 512 字节。",
     )
     parser.add_argument(
         "--extra",

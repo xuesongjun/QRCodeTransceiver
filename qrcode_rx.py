@@ -224,6 +224,21 @@ def extract_seed(droplet: str) -> Optional[int]:
         return None
 
 
+def parse_droplet_header(droplet_str: str) -> Optional[Tuple[int, int, int]]:
+    parts = droplet_str.split("|", 3)
+    if len(parts) != 4:
+        return None
+    try:
+        seed = int(parts[0])
+        num_chunks = int(parts[1])
+        padding = int(parts[2])
+    except ValueError:
+        return None
+    if seed < 0 or num_chunks <= 0 or num_chunks > 1000000 or padding < 0 or padding > 4096:
+        return None
+    return seed, num_chunks, padding
+
+
 def validate_droplet(droplet_str: str, expected_num_chunks: Optional[int] = None) -> bool:
     """验证 droplet 字符串格式是否正确"""
     try:
@@ -270,8 +285,19 @@ def decode_with_fallback(image: np.ndarray, multi: bool = False) -> List[Detecti
     detections = qrdecode(image, multi=multi)
     if detections:
         return detections
+    if not multi:
+        detections = qrdecode(image, multi=True)
+        if detections:
+            return detections
     inverted = cv2.bitwise_not(image)
-    return qrdecode(inverted, multi=multi)
+    detections = qrdecode(inverted, multi=multi)
+    if detections or multi:
+        return detections
+    return qrdecode(inverted, multi=True)
+
+
+def frame_signature(image: np.ndarray) -> Tuple[Tuple[int, ...], int]:
+    return image.shape, zlib.crc32(image.tobytes())
 
 
 def make_progress_bar(done: int, total: int, width: int = 30) -> str:
@@ -329,22 +355,26 @@ class DropletAutoSaver:
         self._completed_files.add(signature)
 
     def feed(self, droplet_str: str) -> bool:
-        # 先验证 droplet 格式
-        expected = self.glass.num_chunks if self.glass else None
-        if not validate_droplet(droplet_str, expected):
+        header = parse_droplet_header(droplet_str)
+        if header is None:
             if self.debug:
                 self._log(f"丢弃无效 droplet: {droplet_str[:50]}...")
             return False
+
+        seed, num_chunks, _ = header
+        if self.glass and num_chunks != self.glass.num_chunks:
+            self._log("检测到新的 droplet 流，重置译码器。")
+            self._reset_session()
+
+        if seed in self._seeds:
+            return False
+
         try:
             droplet = str2Droplet(droplet_str)
         except Exception as exc:
             self._log(f"解析 droplet 失败: {exc}")
             return False
-        if self.glass and droplet.num_chunks != self.glass.num_chunks:
-            self._log("检测到新的 droplet 流，重置译码器。")
-            self._reset_session()
-        if droplet.seed in self._seeds:
-            return False
+
         self._seeds.add(droplet.seed)
         if self.glass is None:
             self.glass = Glass(droplet)
@@ -385,7 +415,7 @@ class DropletAutoSaver:
             file_info = f"[{self.received_files + 1}/{self.total_files}] "
 
         # 使用 \r 覆盖同一行
-        print(f"\r{file_info}接收中: {bar} 已收 {received} 包", end="", file=sys.stderr, flush=True)
+        print(f"\r{file_info}接收中: {bar} 新包 {received}", end="", file=sys.stderr, flush=True)
         if done == total:
             print(file=sys.stderr)  # 完成时换行
 
@@ -532,7 +562,7 @@ def main():
             # 初始阶段使用同步截屏来定位二维码
             while auto_region_enabled and active_region is None:
                 gray = capture_frame(sct, lookup_region)
-                detections = decode_with_fallback(gray, multi=True)
+                detections = decode_with_fallback(gray)
                 target_detection = next(
                     (d for d in detections if d[1] is not None), None
                 )
@@ -551,12 +581,18 @@ def main():
 
             # 定位完成后启动多线程截屏
             screen_cap = ScreenCapture(lookup_region)
+            last_frame_signature: Optional[Tuple[Tuple[int, ...], int]] = None
 
             while True:
                 gray = screen_cap.read(timeout=1.0)
                 if gray is None:
                     continue
-                detections = decode_with_fallback(gray)
+                signature = frame_signature(gray)
+                if signature == last_frame_signature:
+                    time.sleep(args.interval)
+                    continue
+                last_frame_signature = signature
+                detections = decode_with_fallback(gray, multi=True)
                 detected_valid = False
                 for barcode, _ in detections:
                     barcode = barcode.strip()
