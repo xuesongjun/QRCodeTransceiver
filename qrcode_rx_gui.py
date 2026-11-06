@@ -50,6 +50,7 @@ from fountain import Glass, str2Droplet
 
 # 压缩标记前缀
 COMPRESS_MAGIC = b"ZLIB:"
+CLIPBOARD_TEXT_LIMIT = 5 * 1024
 
 Detection = Tuple[str, Optional[Tuple[int, int, int, int]]]
 
@@ -97,8 +98,19 @@ def decode_with_fallback(image: np.ndarray, multi: bool = False) -> List[Detecti
     detections = qrdecode(image, multi=multi)
     if detections:
         return detections
+    if not multi:
+        detections = qrdecode(image, multi=True)
+        if detections:
+            return detections
     inverted = cv2.bitwise_not(image)
-    return qrdecode(inverted, multi=multi)
+    detections = qrdecode(inverted, multi=multi)
+    if detections or multi:
+        return detections
+    return qrdecode(inverted, multi=True)
+
+
+def frame_signature(image: np.ndarray) -> Tuple[Tuple[int, ...], int]:
+    return image.shape, zlib.crc32(image.tobytes())
 
 
 def is_plausible_droplet(droplet_str: str) -> bool:
@@ -112,6 +124,21 @@ def is_plausible_droplet(droplet_str: str) -> bool:
     except ValueError:
         return False
     return seed >= 0 and 0 < num_chunks <= 1000000 and 0 <= padding <= 4096
+
+
+def parse_droplet_header(droplet_str: str) -> Optional[Tuple[int, int, int]]:
+    parts = droplet_str.split("|", 3)
+    if len(parts) != 4:
+        return None
+    try:
+        seed = int(parts[0])
+        num_chunks = int(parts[1])
+        padding = int(parts[2])
+    except ValueError:
+        return None
+    if seed < 0 or num_chunks <= 0 or num_chunks > 1000000 or padding < 0 or padding > 4096:
+        return None
+    return seed, num_chunks, padding
 
 
 def validate_droplet(droplet_str: str, expected_num_chunks: Optional[int] = None) -> bool:
@@ -185,19 +212,20 @@ class Decoder:
         调用方 (_worker_loop) 收到非 None 返回值时，
         通过 root.after() 在主线程触发 _on_file_saved 更新 UI.
         """
-        expected = self.glass.num_chunks if self.glass else None
-        if not validate_droplet(droplet_str, expected):
+        header = parse_droplet_header(droplet_str)
+        if header is None:
+            return None
+
+        seed, num_chunks, _ = header
+        if self.glass and num_chunks != self.glass.num_chunks:
+            self.reset()
+
+        if seed in self._seeds:
             return None
 
         try:
             droplet = str2Droplet(droplet_str)
         except Exception:
-            return None
-
-        if self.glass and droplet.num_chunks != self.glass.num_chunks:
-            self.reset()
-
-        if droplet.seed in self._seeds:
             return None
 
         self._seeds.add(droplet.seed)
@@ -337,13 +365,16 @@ class ReceiverApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("QR Receiver")
-        self.root.geometry("280x170")
+        self.root.geometry("280x200")
         self.root.resizable(False, False)
 
         # 状态
         self.running = False
         self.topmost = tk.BooleanVar(value=False)
         self.overwrite_existing = tk.BooleanVar(value=False)
+        self.timer_running = False
+        self.timer_start_time = 0.0
+        self.timer_elapsed = 0.0
         self.output_dir = Path("decoded")
         self.decoder: Optional[Decoder] = None
         self.worker_thread: Optional[threading.Thread] = None
@@ -371,6 +402,14 @@ class ReceiverApp:
 
         self.btn_folder = tk.Button(toolbar, text="📁 目录", width=btn_width, command=self._on_select_folder)
         self.btn_folder.pack(side=tk.LEFT, padx=2)
+
+        # 计时器
+        timer_frame = tk.Frame(self.root)
+        timer_frame.pack(fill=tk.X, padx=10, pady=2)
+
+        tk.Label(timer_frame, text="用时:", anchor="w").pack(side=tk.LEFT)
+        self.timer_label = tk.Label(timer_frame, text="00:00.0", anchor="w", font=("Arial", 12, "bold"))
+        self.timer_label.pack(side=tk.LEFT, padx=(6, 0))
 
         # 置顶复选框
         topmost_frame = tk.Frame(self.root)
@@ -420,6 +459,82 @@ class ReceiverApp:
     def _update_status(self, text: str):
         self.status_label.config(text=text)
 
+    def _format_elapsed(self, seconds: float) -> str:
+        seconds = max(0.0, seconds)
+        minutes = int(seconds // 60)
+        whole_seconds = int(seconds % 60)
+        tenths = int((seconds - int(seconds)) * 10)
+        return f"{minutes:02d}:{whole_seconds:02d}.{tenths}"
+
+    def _update_timer_label(self):
+        if self.timer_running:
+            elapsed = time.monotonic() - self.timer_start_time
+        else:
+            elapsed = self.timer_elapsed
+        self.timer_label.config(text=self._format_elapsed(elapsed))
+
+    def _poll_timer(self):
+        if not self.timer_running:
+            return
+        self.timer_elapsed = time.monotonic() - self.timer_start_time
+        self._update_timer_label()
+        self.root.after(100, self._poll_timer)
+
+    def _start_timer(self):
+        self.timer_elapsed = 0.0
+        self.timer_start_time = time.monotonic()
+        self.timer_running = True
+        self._poll_timer()
+
+    def _stop_timer(self):
+        if self.timer_running:
+            self.timer_elapsed = time.monotonic() - self.timer_start_time
+            self.timer_running = False
+        self._update_timer_label()
+
+    def _reset_timer(self):
+        self.timer_running = False
+        self.timer_start_time = 0.0
+        self.timer_elapsed = 0.0
+        self._update_timer_label()
+
+    @staticmethod
+    def _decode_clipboard_text(data: bytes) -> Optional[str]:
+        for encoding in ("utf-8-sig", "gb18030"):
+            try:
+                return data.decode(encoding)
+            except UnicodeDecodeError:
+                pass
+        return None
+
+    def _copy_small_single_txt_to_clipboard(self, path: str, file_total: int) -> bool:
+        if file_total > 1:
+            return False
+
+        file_path = Path(path)
+        if file_path.suffix.lower() != ".txt":
+            return False
+
+        try:
+            data = file_path.read_bytes()
+        except OSError:
+            return False
+
+        if len(data) > CLIPBOARD_TEXT_LIMIT:
+            return False
+
+        text = self._decode_clipboard_text(data)
+        if text is None:
+            return False
+
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.root.update_idletasks()
+        except tk.TclError:
+            return False
+        return True
+
     def _update_file_progress(self, received: int, total: int):
         """更新文件进度显示"""
         if total > 0:
@@ -444,7 +559,7 @@ class ReceiverApp:
 
         # 绘制文字
         percent = int(ratio * 100)
-        text = f"{percent}% ({done}/{total}) 已收 {received} 包"
+        text = f"{percent}% 解码 {done}/{total} 新包 {received}"
         self.progress_bar.create_text(width // 2, height // 2, text=text, fill="black")
 
     def _on_start(self):
@@ -454,6 +569,7 @@ class ReceiverApp:
         self.running = True
         self.stop_event.clear()
         self.decoder = Decoder(self.output_dir, overwrite_existing=self.overwrite_existing.get())
+        self._start_timer()
 
         self.btn_start.config(state=tk.DISABLED)
         self.btn_stop.config(state=tk.NORMAL)
@@ -470,6 +586,7 @@ class ReceiverApp:
     def _on_stop(self):
         self.running = False
         self.stop_event.set()
+        self._stop_timer()
 
         self.btn_start.config(state=tk.NORMAL)
         self.btn_stop.config(state=tk.DISABLED)
@@ -481,6 +598,9 @@ class ReceiverApp:
     def _on_restart(self):
         if self.decoder:
             self.decoder.reset_all()
+        self._reset_timer()
+        if self.running:
+            self._start_timer()
         self._update_status("已重置，等待新的传输...")
         self._update_progress(0, 0, 0)
         self._update_file_progress(0, 0)
@@ -541,6 +661,7 @@ class ReceiverApp:
                 "width": monitor["width"],
                 "height": monitor["height"]
             }
+            last_frame_signature: Optional[Tuple[Tuple[int, ...], int]] = None
 
             while not self.stop_event.is_set():
                 try:
@@ -549,7 +670,13 @@ class ReceiverApp:
                     frame = np.array(raw)
                     gray = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
 
-                    # 全屏定位阶段允许多码检测；定位后只跑单码快路径.
+                    signature = frame_signature(gray)
+                    if signature == last_frame_signature:
+                        time.sleep(0.01)
+                        continue
+                    last_frame_signature = signature
+
+                    # 全屏定位阶段允许多码检测; 定位后先单码检测, 失败时尝试多码检测.
                     is_full_screen = region["width"] == monitor["width"]
                     detections = decode_with_fallback(gray, multi=is_full_screen)
 
@@ -567,6 +694,7 @@ class ReceiverApp:
                                 "width": rect[2] + padding * 2,
                                 "height": rect[3] + padding * 2
                             }
+                            last_frame_signature = None
 
                         if self.decoder:
                             saved = self.decoder.feed(barcode)
@@ -584,11 +712,16 @@ class ReceiverApp:
         filename = Path(path).name
         if self.decoder:
             file_received, file_total = self.decoder.get_file_progress()
+            clipboard_suffix = ""
+            if self._copy_small_single_txt_to_clipboard(path, file_total):
+                clipboard_suffix = "，已复制到剪贴板"
             if file_total > 0:
-                self._update_status(f"已保存 [{file_received}/{file_total}]: {filename}")
+                self._update_status(f"已保存 [{file_received}/{file_total}]: {filename}{clipboard_suffix}")
             else:
-                self._update_status(f"已保存: {filename}")
+                self._update_status(f"已保存: {filename}{clipboard_suffix}")
             self._update_file_progress(file_received, file_total)
+            if file_total <= 0 or self.decoder.is_all_done():
+                self._stop_timer()
         else:
             self._update_status(f"已保存: {filename}")
         self._update_progress(0, 0, 0)

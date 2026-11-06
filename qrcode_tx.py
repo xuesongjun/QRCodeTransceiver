@@ -34,7 +34,7 @@ qrcode_tx.py — 二维码喷泉码发送端 (TX)
 
 常用参数
 --------
-  --chunk-size N      每块字节数, 默认 1024 (越大 QR 越密, 需要屏幕够大)
+  --chunk-size N      每块字节数, 默认 512 (越大 QR 越密, 需要屏幕够大)
   --size N            QR 图片像素边长, 默认 800
   -i, --interval N    播放间隔毫秒, 默认 30 (约 33 fps)
   --error-correction  L/M/Q/H, 等级越高越稳但容量越低, 默认 M
@@ -274,8 +274,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=1024,
-        help="Fountain chunk 大小 (字节) , 默认 1024.越大 QR 越密, 需要屏幕够大够清晰.",
+        default=512,
+        help="Fountain chunk 大小 (字节) , 默认 512.越大 QR 越密, 需要屏幕够大够清晰.",
     )
     parser.add_argument(
         "--extra",
