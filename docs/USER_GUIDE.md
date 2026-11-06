@@ -14,6 +14,9 @@
 
 先使用本次交付的本地 ZIP 包. 项目仓库为 https://github.com/luck-gh/QRCodeTransceiver,
 如果发布者尚未提供 Releases 成品, GitHub 的 Code → Download ZIP 只是源码, 不能双击当作 exe 使用.
+本次功能位于 `wip/qr-transfer-rework-20260825` 分支. 从 GitHub 下载完整工程时,
+先打开 https://github.com/luck-gh/QRCodeTransceiver/tree/wip/qr-transfer-rework-20260825,
+再选择 Code → Download ZIP, 避免下载到默认分支中尚未包含这些功能的旧源码.
 构建方法见 `docs/BUILDING.md`. 不要把 Windows 包放到 Linux 上运行.
 
 **ZIP 必须先完整解压.** B 端建议解压到 `D:\QRTransfer`, 不要直接在压缩包里双击 exe,

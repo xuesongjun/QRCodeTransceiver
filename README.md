@@ -28,6 +28,7 @@
 | `QRCodeSender-manylinux2014_x86_64-cp312-offline.zip` 等 | A 端的特定 Python/架构离线包, 核对标签后运行 `bash install_offline.sh` |
 
 这些名称是构建输出. 仓库源码 ZIP 不包含 exe, 当前没有已发布的 GitHub Releases 成品.
+本次功能和打包工程位于 [wip/qr-transfer-rework-20260825 分支](https://github.com/luck-gh/QRCodeTransceiver/tree/wip/qr-transfer-rework-20260825), 下载源码时请选择该分支.
 [构建与离线分发说明](docs/BUILDING.md) 提供 Windows 接收端、Linux 发送端以及离线包的可重复构建命令.
 [本次验证记录](docs/VALIDATION.md) 区分已运行验证和需要目标环境验收的部分.
 离线 wheels 不包括系统 Python、Tk、venv 和图形桌面, 也不是跨 Python/CPU 通用包.
