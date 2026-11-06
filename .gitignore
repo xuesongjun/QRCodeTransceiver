@@ -8,7 +8,6 @@ venv/
 # PyInstaller
 build/
 dist/
-*.spec
 
 # 项目输出
 decoded/

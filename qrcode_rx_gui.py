@@ -24,6 +24,7 @@ qrcode_rx_gui.py — 二维码喷泉码接收端 (GUI 版)
   📁 目录  — 选择文件保存目录 (默认 decoded/)
   窗口置顶 — 勾选后窗口浮于最前，方便对准发送端屏幕
   同名覆写 — 勾选后收到同名文件直接覆盖，否则加时间戳后缀
+  视频     — 选择 MP4 文件并开始逐帧解析, 自动跟随移动的二维码
 
 与命令行版 (qrcode_rx.py) 的差异
 ---------------------------------
@@ -32,6 +33,8 @@ qrcode_rx_gui.py — 二维码喷泉码接收端 (GUI 版)
   - 所有截屏和译码在后台线程中进行，GUI 线程只负责刷新进度
 """
 
+import argparse
+import hashlib
 import queue
 import sys
 import threading
@@ -47,6 +50,7 @@ import numpy as np
 from mss import mss
 
 from fountain import Glass, str2Droplet
+from qrcode_video import VideoScanner
 
 # 压缩标记前缀
 COMPRESS_MAGIC = b"ZLIB:"
@@ -365,7 +369,7 @@ class ReceiverApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("QR Receiver")
-        self.root.geometry("280x200")
+        self.root.geometry("360x230")
         self.root.resizable(False, False)
 
         # 状态
@@ -375,10 +379,12 @@ class ReceiverApp:
         self.timer_running = False
         self.timer_start_time = 0.0
         self.timer_elapsed = 0.0
-        self.output_dir = Path("decoded")
+        app_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+        self.output_dir = app_dir / "decoded"
         self.decoder: Optional[Decoder] = None
         self.worker_thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
+        self.video_events: queue.Queue[Tuple[str, str]] = queue.Queue()
 
         self._build_ui()
         self._update_status("就绪")
@@ -402,6 +408,12 @@ class ReceiverApp:
 
         self.btn_folder = tk.Button(toolbar, text="📁 目录", width=btn_width, command=self._on_select_folder)
         self.btn_folder.pack(side=tk.LEFT, padx=2)
+
+        self.btn_video = tk.Button(toolbar, text="视频", width=btn_width, command=self._on_video)
+        self.btn_video.pack(side=tk.LEFT, padx=2)
+
+        self.source_label = tk.Label(self.root, text="来源: 屏幕", anchor="w")
+        self.source_label.pack(fill=tk.X, padx=10, pady=2)
 
         # 计时器
         timer_frame = tk.Frame(self.root)
@@ -453,7 +465,7 @@ class ReceiverApp:
         self.status_label = tk.Label(status_frame, text="就绪", anchor="w")
         self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        self.dir_label = tk.Label(status_frame, text=f"📁 {self.output_dir}", anchor="e", fg="gray")
+        self.dir_label = tk.Label(status_frame, text=f"📁 {self.output_dir.name}", anchor="e", fg="gray")
         self.dir_label.pack(side=tk.RIGHT)
 
     def _update_status(self, text: str):
@@ -562,23 +574,39 @@ class ReceiverApp:
         text = f"{percent}% 解码 {done}/{total} 新包 {received}"
         self.progress_bar.create_text(width // 2, height // 2, text=text, fill="black")
 
-    def _on_start(self):
+    def _on_start(self, video_path: Optional[Path] = None):
         if self.running:
+            return
+        if self.worker_thread is not None and self.worker_thread.is_alive():
+            self._update_status("正在停止上一任务, 请稍后再试")
             return
 
         self.running = True
         self.stop_event.clear()
         self.decoder = Decoder(self.output_dir, overwrite_existing=self.overwrite_existing.get())
+        self._update_file_progress(0, 0)
+        self._update_progress(0, 0, 0)
         self._start_timer()
 
         self.btn_start.config(state=tk.DISABLED)
         self.btn_stop.config(state=tk.NORMAL)
-        self.btn_restart.config(state=tk.NORMAL)
+        self.btn_restart.config(state=tk.DISABLED if video_path else tk.NORMAL)
         self.btn_folder.config(state=tk.DISABLED)
+        self.btn_video.config(state=tk.DISABLED)
 
-        self._update_status("等待检测二维码...")
-
-        self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self.video_events = queue.Queue()
+        if video_path is None:
+            self.source_label.config(text="来源: 屏幕")
+            self._update_status("等待检测二维码...")
+            self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+        else:
+            self.source_label.config(text=f"视频: {video_path.name}")
+            self._update_status("正在读取视频...")
+            self.worker_thread = threading.Thread(
+                target=self._video_worker_loop,
+                args=(video_path, self.decoder, self.stop_event, self.video_events),
+                daemon=True,
+            )
         self.worker_thread.start()
 
         self._poll_progress()
@@ -592,8 +620,18 @@ class ReceiverApp:
         self.btn_stop.config(state=tk.DISABLED)
         self.btn_restart.config(state=tk.DISABLED)
         self.btn_folder.config(state=tk.NORMAL)
+        self.btn_video.config(state=tk.NORMAL)
 
         self._update_status("已停止")
+
+    def _on_video(self):
+        """选择本地视频后直接开始解析."""
+        filename = filedialog.askopenfilename(
+            title="选择包含二维码的视频",
+            filetypes=[("MP4 视频", "*.mp4"), ("所有文件", "*.*")],
+        )
+        if filename:
+            self._on_start(Path(filename))
 
     def _on_restart(self):
         if self.decoder:
@@ -623,6 +661,21 @@ class ReceiverApp:
         if not self.running:
             return
 
+        # 视频线程只投递事件, 所有 tkinter 操作在主线程执行.
+        while True:
+            try:
+                event, value = self.video_events.get_nowait()
+            except queue.Empty:
+                break
+            if event == "saved":
+                self._on_file_saved(value)
+            elif event == "progress":
+                self.source_label.config(text=value)
+            elif event == "finished":
+                self._on_stop()
+                self._update_status(value)
+                return
+
         if self.decoder:
             done, total, received = self.decoder.get_progress()
             file_received, file_total = self.decoder.get_file_progress()
@@ -638,6 +691,42 @@ class ReceiverApp:
                 self._update_status(f"全部完成！共 {file_received} 个文件")
 
         self.root.after(100, self._poll_progress)
+
+    def _video_worker_loop(
+        self,
+        path: Path,
+        decoder: Decoder,
+        stop_event: threading.Event,
+        events: queue.Queue,
+    ):
+        """逐帧解析视频, 与屏幕接收共用文件恢复逻辑."""
+        seen: Set[bytes] = set()
+        try:
+            with VideoScanner(path, decode_with_fallback, validate_droplet) as scanner:
+                for droplets in scanner:
+                    if stop_event.is_set():
+                        return
+                    total = f"/{scanner.total_frames}" if scanner.total_frames > 0 else ""
+                    events.put(("progress", f"视频: 第 {scanner.frame_index}{total} 帧"))
+                    for droplet in droplets:
+                        signature = hashlib.sha256(droplet.encode("ascii")).digest()
+                        if signature in seen:
+                            continue
+                        seen.add(signature)
+                        saved = decoder.feed(droplet)
+                        if saved:
+                            events.put(("saved", saved))
+                            if decoder.is_all_done():
+                                events.put(("finished", f"视频解析完成, 已恢复 {decoder.received_files} 个文件"))
+                                return
+            done, total, _ = decoder.get_progress()
+            if total > 0:
+                detail = f"当前文件解出 {done}/{total} 块"
+            else:
+                detail = f"已恢复 {decoder.received_files}/{decoder.total_files} 个文件"
+            events.put(("finished", f"视频结束, 数据不足: {detail}"))
+        except (OSError, ValueError, cv2.error) as exc:
+            events.put(("finished", f"视频解析失败: {exc}"))
 
     def _worker_loop(self):
         """
@@ -731,7 +820,16 @@ class ReceiverApp:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="二维码接收端, 支持屏幕和 MP4 文件")
+    parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
     app = ReceiverApp()
+    if args.self_test:
+        # 成品验收时实际创建 Tk 控件, 不弹出交互窗口.
+        app.root.withdraw()
+        app.root.update_idletasks()
+        app.root.destroy()
+        return
     app.run()
 
 

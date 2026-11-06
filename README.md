@@ -7,6 +7,7 @@
 - **喷泉码传输**: 基于 LT 码 (Luby Transform) ，支持无反馈单向传输
 - **自动压缩**: 使用 zlib 压缩，大幅减少传输数据量
 - **自动定位**: RX 自动检测屏幕上的二维码位置
+- **视频接收**: 直接解析 MP4, 跟随二维码移动, 丢失后自动搜索完整画面
 - **实时模式**: TX 默认实时生成新的 droplet，提高传输效率
 - **进度显示**: RX 显示实时进度条
 - **多线程截屏**: RX 使用独立线程截屏，提高处理速度
@@ -14,62 +15,25 @@
 - **离线安装**: 支持在无网络环境下安装部署
 - **多文件传输**: 支持文件列表和通配符批量传输
 
-## 快速安装
+## 从哪里开始
 
-### 在线安装 (有网络)
+使用流程: Linux 电脑 A 播放二维码 → 摄像头录成 MP4 → Windows 电脑 B 解析 → 恢复文件.
 
-```bash
-# 创建虚拟环境
-python -m venv venv
+**第一次使用请看 [新手操作说明](docs/USER_GUIDE.md)**, 包含选包、解压、A 端安装、摄像头录制、B 端解析和保存位置.
 
-# 激活虚拟环境
-# Linux/Mac:
-source venv/bin/activate
-# Windows:
-venv\Scripts\activate
+| 交付物 | 用途 |
+|---|---|
+| `QRCodeReceiver-Windows-x64.zip` | B 端完整解压后双击 `QRReceiver.exe`, 无需安装 Python; 命令行使用 `QRReceiveCLI.exe` |
+| `QRCodeSender-Linux-source.zip` | A 端有网时运行 `bash setup_sender.sh`, 再用 `bash send.sh 文件路径` |
+| `QRCodeSender-manylinux2014_x86_64-cp312-offline.zip` 等 | A 端的特定 Python/架构离线包, 核对标签后运行 `bash install_offline.sh` |
 
-# 安装依赖
-pip install -r requirements.txt
-```
+这些名称是构建输出. 仓库源码 ZIP 不包含 exe, 当前没有已发布的 GitHub Releases 成品.
+[构建与离线分发说明](docs/BUILDING.md) 提供 Windows 接收端、Linux 发送端以及离线包的可重复构建命令.
+[本次验证记录](docs/VALIDATION.md) 区分已运行验证和需要目标环境验收的部分.
+离线 wheels 不包括系统 Python、Tk、venv 和图形桌面, 也不是跨 Python/CPU 通用包.
 
-### 离线安装 (无网络的 Linux 机器)
-
-#### 步骤 1: 在有网络的 Windows 机器上下载依赖包
-
-```bash
-python download_packages.py
-```
-
-按提示选择目标 Linux 平台和 Python 版本.
-
-#### 步骤 2: 复制文件到目标机器
-
-将以下文件/目录复制到目标 Linux 机器:
-
-```
-qrcode_transceiver/
-├── offline_packages/     # 离线包目录
-├── install_offline.sh    # 安装脚本
-├── requirements.txt
-├── qrcode_tx.py
-├── qrcode_rx.py
-├── fountain.py
-└── ...
-```
-
-#### 步骤 3: 在目标机器上安装
-
-```bash
-chmod +x install_offline.sh
-./install_offline.sh
-```
-
-#### 步骤 4: 使用
-
-```bash
-source venv/bin/activate
-python qrcode_rx.py
-```
+开发环境安装全部依赖: `python -m pip install -r requirements.txt`;
+只发送或接收时分别使用 `requirements-tx.txt` / `requirements-rx.txt`.
 
 ## 使用方法
 
@@ -150,6 +114,7 @@ python qrcode_rx.py [选项]
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
+| `--video` | 从 MP4 等视频文件接收; 不指定则截屏接收 | - |
 | `--monitor` | mss 的 monitor 索引 | `1` (主屏) |
 | `--region` | 指定截屏区域 (LEFT TOP WIDTH HEIGHT) | 自动检测 |
 | `--no-auto-region` | 禁用自动定位二维码区域 | - |
@@ -159,6 +124,23 @@ python qrcode_rx.py [选项]
 | `--debug` | 调试模式，输出详细信息 | - |
 | `--output-dir` | 接收文件保存目录 | `decoded` |
 | `--no-save` | 仅输出 droplet，不保存文件 | - |
+
+#### 从 MP4 视频接收
+
+```bash
+python qrcode_rx.py --video recording.mp4 --output-dir decoded
+```
+
+视频按顺序逐帧处理, 不按播放速度等待, 不因为处理速度慢而跳帧. 找到二维码后优先识别附近区域,
+每次识别成功都更新位置; 局部识别失败时立即搜索当前完整帧, 不清空已经收到的数据.
+允许二维码平移、抖动及解码器可识别范围内的旋转和透视变化. 同一个编码包只处理一次.
+
+全部声明文件恢复后自动结束. 若视频读完仍未收齐, 命令行返回退出码 `2`, 提示当前恢复进度;
+文件打不开或读不到画面时返回 `1`. `--region` 和 `--no-auto-region` 只用于屏幕接收,
+不能与 `--video` 同时使用. `--interval` 不影响视频解析速度.
+
+录制时应让二维码完整入镜、清晰可辨, 并持续录到接收所需的编码包数量. 严重运动模糊、
+二维码裁切或录制漏掉太多编码包时, 无法保证恢复成功.
 
 #### GUI 版本
 
@@ -173,20 +155,27 @@ GUI 界面功能:
 - **⏹ 停止** - 停止接收
 - **🔄 重置** - 清除当前接收状态，准备接收新文件
 - **📁 目录** - 选择接收文件保存目录
+- **视频** - 选择 MP4 文件并开始解析, 显示帧进度, 完成或数据不足时自动结束; “停止”可取消解析
 - **同名覆写** - 收到同名文件时直接覆盖已有文件
 - **小文本复制** - 单个 `.txt` 文件不超过 5KB 时，保存后自动复制内容到剪贴板
 
-### 打包 exe
+### 构建交付物
 
-```bash
-# 安装 pyinstaller
-pip install pyinstaller
+在 Windows 构建接收端:
 
-# 打包
-python build_exe.py
+```powershell
+python -m pip install -r requirements-rx.txt -r requirements-build.txt
+python build_exe.py --target windows-receiver
 ```
 
-生成的 exe 位于 `dist/QRReceiver.exe`.
+在任意系统生成 Linux 发送源码包:
+
+```bash
+python build_exe.py --target linux-sender-source
+```
+
+Linux 原生可执行包使用 `--target linux-sender`, 必须在 Linux 构建.
+详细环境和验证要求见 [BUILDING.md](docs/BUILDING.md).
 
 ## 文件说明
 
@@ -195,6 +184,7 @@ python build_exe.py
 | `qrcode_tx.py` | 发送端程序 |
 | `qrcode_rx.py` | 接收端程序 (命令行)  |
 | `qrcode_rx_gui.py` | 接收端程序 (GUI)  |
+| `qrcode_video.py` | 视频逐帧读取和移动二维码识别 |
 | `fountain.py` | 喷泉码核心实现 |
 | `build_exe.py` | exe 打包脚本 |
 | `download_packages.py` | 离线包下载脚本 |

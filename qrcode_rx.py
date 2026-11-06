@@ -3,13 +3,16 @@ qrcode_rx.py — 二维码喷泉码接收端 (RX，命令行版)
 
 功能概述
 --------
-持续截取屏幕，识别二维码中的喷泉码 droplet，
+读取屏幕或视频文件，识别二维码中的喷泉码 droplet，
 用置信传播 (BP) 译码后自动还原并保存文件.
 
 快速使用
 --------
   # 基本用法 (全屏检测，自动定位二维码区域，保存到 decoded/)
   python qrcode_rx.py
+
+  # 解析 MP4, 自动跟随移动的二维码
+  python qrcode_rx.py --video recording.mp4
 
   # 指定截屏区域 (left top width height) ，省去自动定位延迟
   python qrcode_rx.py --region 100 200 800 800
@@ -44,6 +47,7 @@ qrcode_rx.py — 二维码喷泉码接收端 (RX，命令行版)
 """
 
 import argparse
+import hashlib
 import queue
 import sys
 import threading
@@ -58,6 +62,7 @@ import numpy as np
 from mss import mss
 
 from fountain import Glass, str2Droplet
+from qrcode_video import VideoScanner
 
 # TX 端用于传递文件总数的特殊"文件名"，RX 端收到后更新期望总数
 MANIFEST_FILENAME = "__FILE_COUNT__"
@@ -181,7 +186,12 @@ class CaptureRegion:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="截取屏幕上的二维码喷泉码，输出 droplet 字符串."
+        description="从屏幕或视频文件接收二维码喷泉码."
+    )
+    parser.add_argument(
+        "--video",
+        type=Path,
+        help="从 MP4 等视频文件逐帧接收, 允许二维码移动; 不指定时接收屏幕画面.",
     )
     parser.add_argument(
         "--monitor",
@@ -233,7 +243,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="仅输出 droplet，不自动译码保存文件.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.video is not None and (args.region is not None or args.no_auto_region):
+        parser.error("--region 和 --no-auto-region 仅适用于屏幕接收, 不能与 --video 一起使用.")
+    return args
 
 
 def capture_frame(sct: mss, region: CaptureRegion) -> np.ndarray:
@@ -684,6 +697,34 @@ class DropletAutoSaver:
             print(message, file=sys.stderr)
 
 
+def receive_video(args: argparse.Namespace, saver: Optional[DropletAutoSaver]) -> int:
+    """顺序处理视频, 完成所有声明文件时返回 0, 数据不足时返回 2."""
+    seen: Set[bytes] = set()
+    with VideoScanner(args.video, decode_with_fallback, validate_droplet) as scanner:
+        for droplets in scanner:
+            for droplet in droplets:
+                signature = hashlib.sha256(droplet.encode("ascii")).digest()
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                if args.debug or args.no_save:
+                    print(droplet, flush=True)
+                if saver is not None:
+                    saver.feed(droplet)
+                    if saver.total_files > 0 and saver.received_files >= saver.total_files:
+                        return 0
+        if not args.quiet:
+            print(f"\n视频读取结束, 已处理 {scanner.frame_index} 帧, 识别 {len(seen)} 个不同编码包.", file=sys.stderr)
+    if saver is None:
+        return 0
+    if saver.glass is not None:
+        detail = f"当前文件已解出 {saver.glass.chunksDone()}/{saver.glass.num_chunks} 块"
+    else:
+        detail = f"已恢复 {saver.received_files}/{saver.total_files} 个文件"
+    print(f"视频结束但传输未完成: {detail}. 请提供包含足够编码包的视频.", file=sys.stderr)
+    return 2
+
+
 def main():
     """
     命令行入口.
@@ -691,7 +732,7 @@ def main():
     执行流程
     --------
     1. 解析参数，初始化 DropletAutoSaver (除非 --no-save)
-    2. 同步截屏阶段: 全屏扫描，找到第一个 QR 码后记录其坐标
+    2. 指定 --video 时顺序解析视频; 否则全屏扫描并定位二维码
     3. 缩小区域后启动 ScreenCapture 后台线程，进入高速循环
     4. 主循环: 取帧 → 解码 → 去重 → 喂给 saver → 等待 (无检测时)
     5. Ctrl+C 优雅退出，停止后台截屏线程
@@ -708,6 +749,16 @@ def main():
             verbose=not args.quiet,
             debug=args.debug
         )
+
+    if args.video is not None:
+        try:
+            return receive_video(args, saver)
+        except (OSError, ValueError, cv2.error) as exc:
+            print(f"视频解析失败: {exc}", file=sys.stderr)
+            return 1
+        except KeyboardInterrupt:
+            print("\n用户中断视频解析.", file=sys.stderr)
+            return 130
 
     screen_cap: Optional[ScreenCapture] = None
     try:
@@ -797,4 +848,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
