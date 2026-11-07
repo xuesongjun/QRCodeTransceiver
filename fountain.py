@@ -37,6 +37,7 @@ LT 码 (Luby Transform Code) 是一种无速率纠删码:
 from math import ceil
 import math
 import base64
+import hashlib
 
 
 # ---------------------------------------------------------------------------
@@ -315,49 +316,84 @@ class Glass:
     """
 
     def __init__(self, d: Droplet):
-        self.entries = []             # 待解析的 [chunk_nums, data] 列表
-        self.droplets = []            # 已接收的 Droplet 对象列表 (备用)
-        self.num_chunks = d.num_chunks
-        self.chunks = [None] * self.num_chunks  # 已恢复的 chunk，None 表示未解出
-        self.prob = robust_solition(self.num_chunks)
-        self.padding = d.padding
+        self._initialize(d.num_chunks, d.padding)
         self.addDroplet(d)
+
+    @classmethod
+    def empty(cls, num_chunks, padding):
+        """按已校验的编码参数创建空任务, 用于原始块补传和现场恢复."""
+        glass = cls.__new__(cls)
+        glass._initialize(num_chunks, padding)
+        return glass
+
+    def _initialize(self, num_chunks, padding):
+        self.entries = []             # 待解析的 [chunk_nums, data] 列表
+        self._seeds = {}              # seed 对应载荷, 拒绝重复关系和冲突包
+        self.num_chunks = num_chunks
+        self.chunks = [None] * self.num_chunks  # 已恢复的 chunk，None 表示未解出
+        self._done = 0
+        self.prob = robust_solition(self.num_chunks)
+        self.padding = padding
 
     def addDroplet(self, d):
         """
         加入一个新 droplet 并触发 BP 译码.
 
-        如果 num_chunks == 1，直接赋值；否则通过 updateEntry 做 XOR 消元.
+        持续消元到固定点; 重复种子不会增加关系.
         """
-        if self.num_chunks > 1:
-            d.prob = self.prob
-            self.droplets.append(d)
-            entry = [d.chunkNums(), d.data]
-            self.entries.append(entry)
-            self.updateEntry(entry)
-        else:
-            self.chunks[0] = d.data
+        digest = hashlib.sha256(d.data).digest()
+        if d.seed in self._seeds:
+            if self._seeds[d.seed] != digest:
+                raise ValueError(f'同一 seed 收到不同载荷: {d.seed}')
+            return
+        d.prob = self.prob
+        self._resolve([*self.entries, [d.chunkNums(), d.data]], {})
+        self._seeds[d.seed] = digest
 
-    def updateEntry(self, entry):
-        """
-        BP 消元核心: 对 entry 执行一步置信传播.
+    def addChunk(self, index, data):
+        """合并一个已校验的原始源块, 并继续消解所有待定关系."""
+        if self.chunks[index] is not None:
+            if self.chunks[index] != data:
+                raise ValueError(f'源块 {index} 的载荷冲突')
+            return
+        self._resolve(self.entries, {index: data})
 
-        - 用已知 chunk XOR 消去 entry 中对应的编号
-        - 若 entry 只剩 1 个未知 chunk，解出该 chunk 并递归更新其他 entry
-        """
-        for chunk_num in entry[0]:
-            if self.chunks[chunk_num] is not None:
-                # 已知 chunk，XOR 消去
-                entry[1] = xor(entry[1], self.chunks[chunk_num])
-                entry[0].remove(chunk_num)
-        if len(entry[0]) == 1:
-            # 恢复出新的 chunk
-            self.chunks[entry[0][0]] = entry[1]
-            self.entries.remove(entry)
-            # 通知其他仍包含该 chunk 编号的 entry 更新
-            for d in self.entries:
-                if entry[0][0] in d[0]:
-                    self.updateEntry(d)
+    def solve(self):
+        """迭代到固定点; 不在遍历期间删除列表项, 不依赖下一包触发消元."""
+        self._resolve(self.entries, {})
+
+    def restore(self, chunks, entries, seeds):
+        """载入已在现场文件边界校验过的状态, 再执行固定点消元."""
+        self.chunks, self.entries, self._seeds = chunks, entries, seeds
+        self._done = sum(data is not None for data in chunks)
+        self.solve()
+
+    def _resolve(self, entries, recovered):
+        # 先计算本次消元结果, 完整验证后才提交, 冲突包不能污染既有现场.
+        changed = True
+        while changed:
+            changed = False
+            remaining = []
+            for indices, data in entries:
+                unknown = []
+                for index in indices:
+                    known = self.chunks[index] if self.chunks[index] is not None else recovered.get(index)
+                    if known is None:
+                        unknown.append(index)
+                    else:
+                        data = xor(data, known)
+                if len(unknown) == 1:
+                    recovered[unknown[0]] = data
+                    changed = True
+                elif unknown:
+                    remaining.append([unknown, data])
+                elif any(data):
+                    raise ValueError('编码关系与已恢复源块不一致')
+            entries = remaining
+        for index, data in recovered.items():
+            self.chunks[index] = data
+        self._done += len(recovered)
+        self.entries = entries
 
     def getData(self):
         """
@@ -366,44 +402,14 @@ class Glass:
         会去除最后一块的补零 padding.
         """
         if self.isDone():
-            self.chunks[-1] = self.chunks[-1][:-self.padding]
-            return b''.join(self.chunks)
+            data = b''.join(self.chunks)
+            return data[:-self.padding] if self.padding else data
         return b''
 
     def isDone(self):
         """所有 chunk 均已恢复时返回 True."""
-        return None not in self.chunks
+        return self._done == self.num_chunks
 
     def chunksDone(self):
         """返回当前已恢复的 chunk 数量，用于进度显示."""
-        return sum(1 for x in self.chunks if x is not None)
-
-
-# ---------------------------------------------------------------------------
-# 模块自测 (仅开发调试用，正常运行不执行循环体)
-# ---------------------------------------------------------------------------
-
-b = seeded_random(None)
-for i in range(0):
-    print(b())
-
-y = seeded_random(None)
-for i in range(49, 50):
-    a = robust_solition(2 + i)
-    for j in range(500):
-        tmp = y()
-
-testData = bytes(range(1, 11))
-fountain = Fountain(testData, 4)
-for _i in range(0):
-    ds = fountain.droplet().getStr()
-    d = str2Droplet(ds)
-    g = Glass(d)
-    print(_i, f'完成度: {g.chunksDone()}/{g.num_chunks}')
-    while not g.isDone():
-        ds = fountain.droplet().getStr()
-        print(ds)
-        d = str2Droplet(ds)
-        g.addDroplet(d)
-        print(_i, f'完成度: {g.chunksDone()}/{g.num_chunks}')
-    print('解码后的数据:', list(g.getData()))
+        return self._done

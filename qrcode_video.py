@@ -1,6 +1,5 @@
 """读取视频文件, 跟随移动的二维码并逐帧提取喷泉编码包."""
 
-import zlib
 from pathlib import Path
 from typing import Callable, Iterator, List, Optional, Tuple
 
@@ -12,47 +11,14 @@ Rect = Tuple[int, int, int, int]
 Detection = Tuple[str, Optional[Rect]]
 
 
-class VideoScanner:
-    """
-    顺序读取视频, 优先识别上一帧二维码附近, 失败时立即搜索当前完整帧.
+class MovingQRScanner:
+    """在灰度帧中跟随二维码; 局部识别失败后立即搜索同一完整帧."""
 
-    参数
-    ----
-    path : 视频文件路径.
-    decode : 现有 QR 解码函数, 接收灰度图和 multi 参数.
-    validate : 现有喷泉包校验函数, 用于排除画面中的无关二维码.
-
-    使用 with 管理视频句柄. 每次迭代返回一帧中的有效编码包列表,
-    不按视频播放速度等待, 不丢弃尚未处理的帧.
-    """
-
-    def __init__(
-        self,
-        path: Path,
-        decode: Callable[[np.ndarray, bool], List[Detection]],
-        validate: Callable[[str], bool],
-    ):
-        self.path = path
+    def __init__(self, decode: Callable[[np.ndarray, bool], List[Detection]], validate: Callable[[str], bool]):
         self.decode = decode
         self.validate = validate
-        self.frame_index = 0
-        self.total_frames = 0
         self.region: Optional[Rect] = None
-        self._last_signature = None
-
-    def __enter__(self):
-        if not self.path.is_file():
-            raise FileNotFoundError(f"找不到视频文件: {self.path}")
-        self.capture = cv2.VideoCapture(str(self.path))
-        if not self.capture.isOpened():
-            self.capture.release()
-            raise ValueError(f"无法打开视频, 请检查文件及视频编码格式: {self.path}")
-        # 帧总数仅用于显示进度, 不用于决定读取终点.
-        self.total_frames = int(self.capture.get(cv2.CAP_PROP_FRAME_COUNT))
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.capture.release()
+        self._shape = None
 
     def _detect(self, gray: np.ndarray, left: int, top: int, multi: bool) -> List[Detection]:
         detections = []
@@ -66,7 +32,10 @@ class VideoScanner:
             detections.append((text, rect))
         return detections
 
-    def _scan(self, gray: np.ndarray) -> List[str]:
+    def scan(self, gray: np.ndarray) -> List[str]:
+        if self._shape != gray.shape:
+            self.region = None
+            self._shape = gray.shape
         detections = []
         if self.region is not None:
             left, top, width, height = self.region
@@ -89,6 +58,30 @@ class VideoScanner:
             break
         return [text for text, _ in detections]
 
+
+class VideoScanner:
+    """使用 with 顺序读取视频帧; 不按播放速度等待, 不跳过未处理的帧."""
+
+    def __init__(self, path: Path, decode: Callable[[np.ndarray, bool], List[Detection]], validate: Callable[[str], bool]):
+        self.path = path
+        self.qr = MovingQRScanner(decode, validate)
+        self.frame_index = 0
+        self.total_frames = 0
+        self._last_signature = None
+
+    def __enter__(self):
+        if not self.path.is_file():
+            raise FileNotFoundError(f"找不到视频文件: {self.path}")
+        self.capture = cv2.VideoCapture(str(self.path))
+        if not self.capture.isOpened():
+            self.capture.release()
+            raise ValueError(f"无法打开视频, 请检查文件及视频编码格式: {self.path}")
+        self.total_frames = int(self.capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.capture.release()
+
     def __iter__(self) -> Iterator[List[str]]:
         while True:
             ok, frame = self.capture.read()
@@ -98,9 +91,9 @@ class VideoScanner:
                 return
             self.frame_index += 1
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            signature = (gray.shape, zlib.crc32(gray.tobytes()))
+            signature = (gray.shape, gray.tobytes())
             if signature == self._last_signature:
                 yield []
                 continue
             self._last_signature = signature
-            yield self._scan(gray)
+            yield self.qr.scan(gray)

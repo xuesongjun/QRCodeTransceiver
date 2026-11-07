@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 venv/
 .venv/
+.venv-build/
 
 # PyInstaller
 build/
@@ -13,6 +14,11 @@ dist/
 decoded/
 droplets/
 offline_packages/
+received/
+tasks/
+*.qrtx
+*.qrrx
+*.qrreq
 
 # IDE
 .claude/

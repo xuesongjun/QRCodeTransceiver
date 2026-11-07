@@ -1,0 +1,62 @@
+name: Build desktop packages
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '**.py'
+      - 'requirements*.txt'
+      - 'packaging/**'
+      - 'docs/**'
+      - '.github/workflows/packages.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        role: [sender, receiver]
+        arch: [x64, x86]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.arch }}
+      - run: python -m pip install -r requirements.txt -r requirements-build.txt
+      - run: python -m unittest discover -s tests -v
+      - run: python tests/smoke_ui.py
+      - run: python build_exe.py --target windows-${{ matrix.role }} --arch ${{ matrix.arch }} --output-dir dist/current
+      - run: python tests/smoke_package.py dist/current/QRCode${{ matrix.role == 'sender' && 'Sender' || 'Receiver' }}-Windows-${{ matrix.arch }}.zip --role ${{ matrix.role }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-${{ matrix.role }}-${{ matrix.arch }}
+          path: |
+            dist/current/*.zip
+            dist/current/*.sha256
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-22.04
+    container: rockylinux:8
+    strategy:
+      fail-fast: false
+      matrix:
+        role: [sender, receiver]
+    steps:
+      - name: Prepare checkout tools
+        run: dnf install -y git libstdc++
+      - uses: actions/checkout@v6
+      - name: Build and test Linux x64 package
+        run: bash packaging/build_linux.sh ${{ matrix.role }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-${{ matrix.role }}-x64-glibc228
+          path: |
+            dist/current/*.zip
+            dist/current/*.sha256
+          if-no-files-found: error
