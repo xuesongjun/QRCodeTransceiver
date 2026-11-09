@@ -1,0 +1,7 @@
+FROM rockylinux:8
+RUN dnf install -y python3.12 python3.12-pip python3.12-tkinter binutils mesa-libGL xorg-x11-server-Xvfb fontconfig
+COPY requirements.txt requirements-tx.txt requirements-rx.txt requirements-build.txt /build-requirements/
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN python3.12 -m pip install -r /build-requirements/requirements.txt -r /build-requirements/requirements-build.txt
+WORKDIR /work
+CMD ["bash", "packaging/build_linux.sh"]
