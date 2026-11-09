@@ -51,4 +51,4 @@ CI 仅在 Windows x64 和 Rocky Linux 8 x64 构建, 全部成功后才发布 Rel
 本版不包含改变参数的二次识别“打捞”或参考信号自动采样同步. 录制漏帧、严重模糊或欠秩时仍需追加接收/定向补传,
 不能保证任意视频一次恢复. 大型残余系统的消元仍有 CPU/内存成本, 本版没有超大文件性能保证.
 
-[新手使用说明](https://github.com/luck-gh/QRCodeTransceiver/blob/v0.1.0/docs/USER_GUIDE.md)
+新手使用说明见包内“使用说明.txt”及源码中的 docs/USER_GUIDE.md.
