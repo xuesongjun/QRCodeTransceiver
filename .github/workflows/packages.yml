@@ -3,6 +3,8 @@ name: Build desktop packages
 on:
   workflow_dispatch:
   push:
+    branches: [master]
+    tags: ['v*']
     paths:
       - '**.py'
       - 'requirements*.txt'
@@ -13,6 +15,9 @@ on:
 permissions:
   contents: read
 
+env:
+  PYTHONUTF8: '1'
+
 jobs:
   windows:
     runs-on: windows-2022
@@ -20,7 +25,7 @@ jobs:
       fail-fast: false
       matrix:
         role: [sender, receiver]
-        arch: [x64, x86]
+        arch: [x64]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -32,6 +37,10 @@ jobs:
       - run: python tests/smoke_ui.py
       - run: python build_exe.py --target windows-${{ matrix.role }} --arch ${{ matrix.arch }} --output-dir dist/current
       - run: python tests/smoke_package.py dist/current/QRCode${{ matrix.role == 'sender' && 'Sender' || 'Receiver' }}-Windows-${{ matrix.arch }}.zip --role ${{ matrix.role }}
+      - name: Build source and offline package
+        run: |
+          python download_packages.py --role ${{ matrix.role }} --platform win_amd64 --python-version 3.12 --output-dir offline_packages/${{ matrix.role }}
+          python build_exe.py --target windows-${{ matrix.role }} --source --wheel-dir offline_packages/${{ matrix.role }} --output-dir dist/current
       - uses: actions/upload-artifact@v7
         with:
           name: windows-${{ matrix.role }}-${{ matrix.arch }}
@@ -53,6 +62,10 @@ jobs:
       - uses: actions/checkout@v6
       - name: Build and test Linux x64 package
         run: bash packaging/build_linux.sh ${{ matrix.role }}
+      - name: Build source and offline package
+        run: |
+          python3.12 download_packages.py --role ${{ matrix.role }} --platform manylinux_2_28_x86_64 --python-version 3.12 --output-dir offline_packages/${{ matrix.role }}
+          python3.12 build_exe.py --target linux-${{ matrix.role }} --source --wheel-dir offline_packages/${{ matrix.role }} --output-dir dist/current
       - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.role }}-x64-glibc228
@@ -60,3 +73,27 @@ jobs:
             dist/current/*.zip
             dist/current/*.sha256
           if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist/release
+          merge-multiple: true
+      - name: Verify and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(find dist/release -maxdepth 1 -name '*.zip' | wc -l)" -eq 12
+          cat dist/release/*.sha256 > dist/release/SHA256SUMS.txt
+          (cd dist/release && sha256sum --check SHA256SUMS.txt)
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "$GITHUB_REF_NAME - Windows x64 / Linux x64" \
+            --notes-file docs/RELEASE_NOTES.md dist/release/*

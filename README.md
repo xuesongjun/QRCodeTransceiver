@@ -4,12 +4,12 @@
 远端仓库: https://github.com/luck-gh/QRCodeTransceiver
 
 新传输协议 QT2 每包绑定具体任务、分块参数和校验. 每轮先覆盖全部源块, 再发新的 LT 喷泉修复包.
-漏包不导致后续编码包失效; 译码器持续消元到固定点. 只有完整编码数据和最终文件 SHA-256 校验都通过才标记完成.
+漏包不导致后续编码包失效; 译码器先剥皮, 再用 GF(2) 高斯消元求解残余方程. 只有完整编码数据和最终文件 SHA-256 校验都通过才标记完成.
 
 ## 新手入口
 
 完整流程见 [使用说明](docs/USER_GUIDE.md). 四种角色的安装、构建见 [构建说明](docs/BUILDING.md).
-本地新交付在 `dist/current`, 实际验收范围见 [验证记录](docs/VALIDATION.md).
+[Release 下载](https://github.com/luck-gh/QRCodeTransceiver/releases) 提供正式附件, 本地构建在 `dist/current`, 实际验收范围见 [验证记录](docs/VALIDATION.md).
 
 | 角色 | Windows 便携入口 | Linux 便携入口 | Python 窗口 / 命令行 |
 |---|---|---|---|
@@ -43,4 +43,4 @@ python qrcode_rx.py --legacy --video old.mp4
 开发依赖: `python -m pip install -r requirements.txt`; 测试: `python -m unittest discover -s tests -v`.
 新发送端统一为单文件任务, 多文件先打成 ZIP; 删除旧的多文件交织/预生成循环契约. 用户要求的旧 MP4 一次性解析入口保留, 不合并新任务.
 [协议说明及后续节奏同步讨论](docs/PROTOCOL_NOTES.md) 区分已实现内容与研究方向.
-本轮未获准推送, 所有新改动和 workflow 保留本地.
+正式交付优先 Windows x64 / Linux x64. 推送 v* 标签后, CI 完成双端构建、验收和源码/离线包准备, 再发布 [GitHub Release](https://github.com/luck-gh/QRCodeTransceiver/releases).

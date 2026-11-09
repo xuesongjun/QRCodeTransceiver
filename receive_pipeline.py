@@ -1,7 +1,7 @@
 """UI/CLI 共用的逐帧接收、任务续收、最终校验和现场保存流程."""
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -21,6 +21,7 @@ class RoundResult:
     error: str = ''
     duplicate_video: bool = False
     cancelled: bool = False
+    solving: dict = field(default_factory=dict)
 
     def text(self):
         if self.task is None:
@@ -32,8 +33,12 @@ class RoundResult:
                   '源块已齐, 最终校验或文件保存未完成' if not task.missing else '仍有未恢复源块')
         saved = f'现场已保存: {task.state_path}' if self.state_saved else '现场未保存成功'
         prefix = '重复视频, 保留原进度. ' if self.duplicate_video else ''
+        solving = (f"本轮结束求解: 高斯新增恢复 {self.solving['gaussian']} 块, "
+                   f"求解前残余方程秩 {self.solving['rank']}/{self.solving['unknowns']}. "
+                   if self.solving else '')
         return (f'{prefix}{task.label}: 总源块 {task.parameters.num_chunks}, 已恢复 {task.done}, '
                 f'未恢复 {len(task.missing)}, 本轮新增 {self.new_blocks}. {status}. {saved}. '
+                + solving
                 + (f'错误: {self.error}. ' if self.error else '')
                 + (f'无效编码包累计 {task.invalid_packets}, 重复编码包累计 {task.duplicate_packets}. ')
                 + (f'异常原因: {task.errors}. ' if task.errors else '')
@@ -77,7 +82,7 @@ def process_video(path: Path, task, output_dir: Path, stop_event, state_path=Non
             if task is not None and not result.cancelled:
                 task.videos.add(fingerprint)
         if task is not None:
-            task.finish()
+            result.solving = task.finish()
             if task.verified:
                 task.write_output(output_dir, overwrite)
     except (OSError, ValueError, cv2.error) as exc:
@@ -88,6 +93,7 @@ def process_video(path: Path, task, output_dir: Path, stop_event, state_path=Non
                  missing=len(task.missing), new_blocks=result.new_blocks, error=result.error,
                  file=task.label, verified=task.verified, invalid_packets=task.invalid_packets,
                  cancelled=result.cancelled, duplicate_video=result.duplicate_video,
+                 solving=result.solving,
                  next_step='打开恢复文件' if task.verified and task.output_path else '追加视频或复制补传码到发送端')
         destination = state_path or task.state_path or output_dir / 'tasks' / f'{task.parameters.task_id[:16]}_{time.time_ns()}.qrrx'
         try:

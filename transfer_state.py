@@ -204,7 +204,7 @@ class ReceiveTask:
         return True
 
     def finish(self):
-        self.glass.solve()
+        solving = self.glass.solve()
         self.last_round_finished = True
         if self.glass.isDone():
             try:
@@ -214,6 +214,7 @@ class ReceiveTask:
                 raise
             self.integrity_error = ''
             self.verified = True
+        return solving
 
     def write_output(self, directory: Path, overwrite=False):
         self.finish()
@@ -234,10 +235,10 @@ class ReceiveTask:
         return target
 
     def feedback(self, mode='auto', scope=None):
-        self.finish()
+        solving = self.finish()
         feedback = create_feedback(self.parameters.task_id, self.parameters.num_chunks, self.missing, mode, scope)
         self.log('生成补传请求', mode=feedback.description, code_length=len(feedback.code), requested=len(feedback.requested),
-                 total=self.parameters.num_chunks, restored=self.done, missing=len(self.missing))
+                 total=self.parameters.num_chunks, restored=self.done, missing=len(self.missing), solving=solving)
         return feedback
 
     def save(self, path: Path):

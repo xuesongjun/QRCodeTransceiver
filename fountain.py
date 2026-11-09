@@ -359,8 +359,58 @@ class Glass:
         self._resolve(self.entries, {index: data})
 
     def solve(self):
-        """迭代到固定点; 不在遍历期间删除列表项, 不依赖下一包触发消元."""
+        """先剥皮到固定点, 再对残余方程做 GF(2) 消元, 返回本次恢复量与残余秩."""
+        before = self._done
         self._resolve(self.entries, {})
+        after_peeling = self._done
+        unknowns = self.num_chunks - after_peeling
+        rank = 0
+        if self.entries:
+            entries, rank = self._eliminate()
+            self._resolve(entries, {})
+        return {'peeling': after_peeling - before, 'gaussian': self._done - after_peeling,
+                'rank': rank, 'unknowns': unknowns}
+
+    def _eliminate(self):
+        """位集高斯消元; 系数和整块载荷都用整数 XOR, 不使用实数线性代数."""
+        unknown = [index for index, data in enumerate(self.chunks) if data is None]
+        columns = {index: column for column, index in enumerate(unknown)}
+        width = len(self.entries[0][1])
+        basis = {}
+        for indices, data in self.entries:
+            mask = sum(1 << columns[index] for index in indices)
+            value = int.from_bytes(data, 'little')
+            while mask:
+                pivot = mask.bit_length() - 1
+                if pivot not in basis:
+                    basis[pivot] = (mask, value)
+                    break
+                other_mask, other_value = basis[pivot]
+                mask ^= other_mask
+                value ^= other_value
+            if not mask and value:
+                raise ValueError('残余编码方程矛盾, 不能完成高斯译码')
+        # 从低主元向高主元回代. 自由变量保留, 只恢复被唯一确定的源块.
+        entries = []
+        for pivot in sorted(basis):
+            mask, value = basis[pivot]
+            pending = mask ^ (1 << pivot)
+            while pending:
+                column = pending.bit_length() - 1
+                if column in basis:
+                    other_mask, other_value = basis[column]
+                    mask ^= other_mask
+                    value ^= other_value
+                pending = mask & ((1 << column) - 1)
+            basis[pivot] = (mask, value)
+            indices = []
+            remaining = mask
+            while remaining:
+                bit = remaining & -remaining
+                indices.append(unknown[bit.bit_length() - 1])
+                remaining ^= bit
+            entries.append([indices, value.to_bytes(width, 'little')])
+        return entries, len(basis)
 
     def restore(self, chunks, entries, seeds):
         """载入已在现场文件边界校验过的状态, 再执行固定点消元."""

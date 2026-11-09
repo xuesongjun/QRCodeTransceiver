@@ -48,11 +48,12 @@ x86 32 位 Linux 当前的 Pillow/OpenCV/NumPy 固定版本缺少现成 wheels.
 
 ## 自动构建工程
 
-`.github/workflows/packages.yml` 配置 Windows x64/x86 双角色和 Rocky Linux 8 x64 双角色.
+`.github/workflows/packages.yml` 配置 Windows x64 双角色和 Rocky Linux 8 x64 双角色.
 使用系统自带的 Python/Tk 在构建环境中打包, 并在 Xvfb/Windows 中运行 GUI 和文件内容验收.
 输出为 Actions Artifacts, 不自动创建 Releases 或部署.
-**本轮用户要求暂不推送, 因此新 workflow 留在本地, 尚未在远端运行.**
-以后推送相关源码或手工启动 workflow 后才能获得对应环境实构的包; 不将未运行配置标成通过.
+用户已批准验收后推送并发布. master 更新执行构建, v* 标签在四个目标全部构建/验收成功后,
+下载 Actions 附件并核对 12 个 ZIP 的 SHA-256, 然后发布 GitHub Release. Windows x86 暂不进入本轮矩阵.
+Release 说明取自 docs/RELEASE_NOTES.md. 不将未运行的目标标成已验证.
 
 ## 四种源码和离线库包
 

@@ -55,8 +55,13 @@ def main(argv=None):
             print(result.text(), file=sys.stderr)
             if result.error:
                 return 1
-        elif task is not None and task.integrity_error:
-            raise ValueError(task.integrity_error)
+        elif task is not None:
+            if task.integrity_error:
+                raise ValueError(task.integrity_error)
+            if task.verified:
+                target = task.write_output(args.output_dir)
+                task.save(task.state_path)
+                print(f'{task.label}: 完整求解和最终校验通过, 文件已保存: {target}', file=sys.stderr)
         if task is None:
             print('未找到有效任务包. 旧视频请使用 --legacy.', file=sys.stderr)
             return 2
@@ -64,7 +69,8 @@ def main(argv=None):
             feedback = task.feedback(args.request_mode)
             atomic_write(args.request_out, (feedback.code + '\n').encode('ascii'))
             task.save(task.state_path)
-            print(f'{task.label}: 总源块 {task.parameters.num_chunks}, 已恢复 {task.done}, 未恢复 {len(task.missing)}; {feedback.description}, {len(feedback.code)} 字符. 现场已保存. 将补传码复制到发送端.', file=sys.stderr)
+            next_step = '将补传码复制到发送端.' if feedback.requested else '没有待补传源块, 文件已完成校验.'
+            print(f'{task.label}: 总源块 {task.parameters.num_chunks}, 已恢复 {task.done}, 未恢复 {len(task.missing)}; {feedback.description}, {len(feedback.code)} 字符. 现场已保存. {next_step}', file=sys.stderr)
             print(feedback.code)
         return 130 if stop.is_set() else 0 if task.verified else 2
     except (OSError, ValueError, cv2.error, ScreenShotError) as exc:
@@ -75,4 +81,6 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
     raise SystemExit(main())

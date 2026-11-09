@@ -23,7 +23,7 @@ def main():
     root.withdraw()
     sender_root = tk.Toplevel(root)
     sender_root.withdraw()
-    with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1] / 'build', prefix='ui-check-') as temp:
+    with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1], prefix='ui-check-') as temp:
         folder = Path(temp)
         sender, body, video, partial = samples(folder)
         sender.save(folder / 'send.qrtx')

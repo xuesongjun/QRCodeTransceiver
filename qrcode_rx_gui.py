@@ -149,6 +149,9 @@ class ReceiverApp:
         if name:
             try:
                 self.task = ReceiveTask.load(Path(name))
+                if self.task.verified:
+                    self.task.write_output(Path(self.output.get()))
+                self.task.save(Path(name))
                 self.saved = True
                 self.selected.clear()
                 self.code.set('')
@@ -159,9 +162,17 @@ class ReceiverApp:
                 self.logs.configure(state='disabled')
                 for event in self.task.events[-30:]:
                     self.append_log(self.event_text(event))
-                self.status.set('现场已恢复. ' + (self.task.integrity_error or '可追加视频或生成最新补传码.'))
+                if self.task.integrity_error:
+                    next_step = self.task.integrity_error
+                elif self.task.verified:
+                    next_step = f'文件校验通过并已保存: {self.task.output_path}'
+                else:
+                    next_step = '可追加视频或生成最新补传码.'
+                self.status.set('现场已恢复并保存. ' + next_step)
             except (OSError, ValueError) as exc:
-                messagebox.showerror('无法恢复现场', str(exc))
+                self.saved = False
+                self.status.set(f'恢复或保存现场失败: {exc}')
+                messagebox.showerror('恢复或保存现场失败', str(exc))
 
     def update_task(self):
         if self.task is not None:
@@ -231,17 +242,25 @@ class ReceiverApp:
             scope = {block for index in self.selected for block in range(self.map_cells[index].start, self.map_cells[index].end)}
         try:
             feedback = self.task.feedback(self.modes[self.mode.get()], scope)
+            if self.task.verified:
+                self.task.write_output(Path(self.output.get()))
             self.feedback_code = feedback.code
             self.code.set(feedback.code)
             saved = self.save()
+            if feedback.requested:
+                next_step = '下一步: 复制单行补传码到发送端, 打开原发送任务后补发; 再追加补传视频.'
+            elif self.task.verified:
+                next_step = f'无需补传. 文件校验通过并已保存: {self.task.output_path}'
+            else:
+                next_step = '所选区域无需补传; 任务其他区域仍有未恢复源块, 可选择其他区域或追加视频.'
             text = (f'{self.task.label}: 总源块 {self.task.parameters.num_chunks}, 已恢复 {self.task.done}, 未恢复 {len(self.task.missing)}. '
                     f'请求 {len(feedback.requested)} 个源块, {feedback.description}, {len(feedback.code)} 字符. '
                     + ('现场已保存. ' if saved else '现场未保存成功. ')
-                    + '下一步: 复制单行补传码到发送端, 打开原发送任务后补发; 再追加补传视频.')
+                    + next_step)
             self.status.set(text)
             self.append_log(text)
             self.update_task()
-        except ValueError as exc:
+        except (OSError, ValueError) as exc:
             messagebox.showerror('不能生成补传码', str(exc))
 
     def copy(self):

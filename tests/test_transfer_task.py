@@ -26,6 +26,41 @@ class TaskTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_pending_full_rank_snapshot_and_feedback_use_existing_equations_first(self):
+        from video_samples import stalled_sample
+        sender, body, packets, _ = stalled_sample(self.root)
+        task = ReceiveTask(sender.parameters)
+        for packet in packets:
+            task.feed(packet.text())
+        self.assertEqual(task.done, 0)
+        path = self.root / 'full-rank.qrrx'
+        task.save(path)
+        reopened = ReceiveTask.load(path)
+        self.assertTrue(reopened.verified)
+        self.assertEqual(reopened.write_output(self.root / 'full-rank-output').read_bytes(), body)
+        feedback = task.feedback()
+        self.assertEqual(feedback.requested, ())
+        self.assertEqual(task.done, 3)
+        self.assertEqual(task.events[-1]['solving']['gaussian'], 3)
+
+    def test_deficient_snapshot_retains_relations_for_later_source_repair(self):
+        from video_samples import stalled_sample
+        sender, body, packets, _ = stalled_sample(self.root)
+        task = ReceiveTask(sender.parameters)
+        # ABC 和 AB 唯一确定 C, A/B 仍需一份独立信息, 不能猜出它们.
+        for packet in packets[:2]:
+            task.feed(packet.text())
+        feedback = task.feedback()
+        self.assertEqual(task.done, 1)
+        self.assertEqual(feedback.requested, (0, 1))
+        path = self.root / 'deficient.qrrx'
+        task.save(path)
+        reopened = ReceiveTask.load(path)
+        reopened.feed(Packet(sender.parameters, SOURCE, 0, 2, sender.source(0)).text())
+        reopened.finish()
+        self.assertTrue(reopened.verified)
+        self.assertEqual(reopened.write_output(self.root / 'deficient-output').read_bytes(), body)
+
     def packet(self, index, round_no=1):
         return Packet(self.sender.parameters, SOURCE, index, round_no, self.sender.source(index)).text()
 

@@ -20,7 +20,7 @@ from receive_pipeline import process_video
 from screen_record import record_screen
 from transfer_protocol import Packet, SOURCE, is_transfer_text
 from transfer_state import ReceiveTask
-from video_samples import samples, write_video
+from video_samples import samples, write_video, stalled_sample
 
 class TrackingTests(unittest.TestCase):
     def test_tracking_translates_coordinates_and_reacquires_same_frame(self):
@@ -85,7 +85,7 @@ class TrackingTests(unittest.TestCase):
 class VideoIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.temp = tempfile.TemporaryDirectory(prefix='qr-video-test-', dir=Path(__file__).resolve().parents[1] / 'build')
+        cls.temp = tempfile.TemporaryDirectory(prefix='qr-video-test-', dir=Path(__file__).resolve().parents[1])
         cls.root = Path(cls.temp.name)
         cls.sender, cls.body, cls.video, cls.incomplete = samples(cls.root)
 
@@ -98,6 +98,32 @@ class VideoIntegrationTests(unittest.TestCase):
         with patch('screen_record.mss', side_effect=AssertionError('导入视频不能截屏')), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(rx.main(['--video', str(self.video), '--output-dir', str(output), '--quiet']), 0)
         self.assertEqual((output / 'restored.bin').read_bytes(), self.body)
+
+    def test_end_of_video_gaussian_solves_full_rank_without_any_source_packet(self):
+        sender, original, packets, video = stalled_sample(self.root)
+        result = process_video(video, None, self.root / 'gaussian-output', threading.Event())
+        self.assertEqual(result.error, '')
+        self.assertEqual(result.solving['gaussian'], 3)
+        self.assertEqual(Path(result.task.output_path).read_bytes(), original)
+        self.assertTrue(result.task.verified)
+
+    def test_legacy_full_rank_video_uses_same_gaussian_solver(self):
+        body = bytes(range(160))
+        payload = b'old-gaussian.bin|1|1\n' + body
+        fountain = Fountain(payload, 64)
+        self.assertEqual(fountain.num_chunks, 3)
+        from fountain import Droplet, randChunkNums, xor
+        texts = []
+        for seed in (2, 10, 12):
+            data = bytes(64)
+            for index in randChunkNums(3, fountain.prob, seed):
+                data = xor(data, fountain.chunk(index))
+            texts.append(Droplet(data, seed, 3, fountain.padding).getStr())
+        video = self.root / 'old-gaussian.mp4'
+        write_video(video, texts)
+        files = receive_legacy_video(video, self.root / 'old-gaussian-output', threading.Event())
+        self.assertEqual(len(files), 1)
+        self.assertEqual(Path(files[0]).read_bytes(), body)
 
     def test_save_restart_feedback_targeted_video_repeat_and_final_hash(self):
         output, state = self.root / 'workflow', self.root / 'workflow.qrrx'

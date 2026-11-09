@@ -16,7 +16,7 @@ from test_video_rx import VideoIntegrationTests
 from qr_decode import decode_with_fallback
 from transfer_state import ReceiveTask, SendTask
 from transfer_protocol import Packet, SOURCE
-from video_samples import write_video
+from video_samples import write_video, stalled_sample
 
 
 def main():
@@ -119,6 +119,11 @@ def main():
                 result = run([str(cli), '--video', str(folder / 'missing.mp4'), '--output-dir', str(restored), '--quiet'])
                 if result.returncode != 1:
                     raise RuntimeError('缺失视频没有正确报告失败')
+                sender, body, packets, video = stalled_sample(folder)
+                output = folder / 'gaussian-output'
+                result = run([str(cli), '--video', str(video), '--output-dir', str(output)])
+                if result.returncode != 0 or (output / 'gaussian.bin').read_bytes() != body:
+                    raise RuntimeError(f'接收成品未完成满秩高斯译码: {result.stderr!r}')
             finally:
                 VideoIntegrationTests.tearDownClass()
     print(f'PASS: {args.role} 成品 GUI/CLI 启动及数据内容验收')

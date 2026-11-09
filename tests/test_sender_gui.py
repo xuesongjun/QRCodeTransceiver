@@ -14,7 +14,7 @@ from transfer_state import SendTask
 
 class SenderWorkerTests(unittest.TestCase):
     def test_background_sender_targets_exact_sources_and_stops(self):
-        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1] / 'build') as temp:
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as temp:
             source = Path(temp) / 'hello.txt'
             source.write_bytes(b'Hello from sender UI')
             task = SendTask.create(source, 128)
@@ -32,7 +32,7 @@ class SenderWorkerTests(unittest.TestCase):
             self.assertEqual((packet.number, packet.data, offset, total), (1, task.source(1), 1, 1))
 
     def test_render_failure_is_reported(self):
-        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1] / 'build') as temp:
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as temp:
             path = Path(temp) / 'input.bin'
             path.write_bytes(b'x')
             frames, events = queue.Queue(maxsize=2), queue.Queue()

@@ -7,7 +7,8 @@ import cv2
 import numpy as np
 
 from qr_render import build_qr
-from transfer_protocol import Packet, SOURCE
+from fountain import robust_solition, randChunkNums, xor
+from transfer_protocol import Packet, SOURCE, FOUNTAIN
 from transfer_state import SendTask
 
 
@@ -40,3 +41,21 @@ def samples(root: Path):
     write_video(full, texts)
     write_video(partial, texts[::2])
     return task, body, full, partial
+
+
+def stalled_sample(root: Path):
+    """三个真实 LT 包构成满秩无单元行系统, 旧剥皮算法无法起步."""
+    original = random.Random(18).randbytes(160)
+    path = root / 'gaussian.bin'
+    path.write_bytes(original)
+    sender = SendTask.create(path, 128, False)
+    assert sender.parameters.num_chunks == 3
+    packets = []
+    for seed in (2, 10, 12):
+        data = bytes(128)
+        for index in randChunkNums(3, robust_solition(3), seed):
+            data = xor(data, sender.source(index))
+        packets.append(Packet(sender.parameters, FOUNTAIN, seed, 1, data))
+    video = root / 'gaussian.mp4'
+    write_video(video, [packet.text() for packet in packets])
+    return sender, original, packets, video

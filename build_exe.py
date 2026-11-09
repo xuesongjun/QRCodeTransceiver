@@ -29,7 +29,7 @@ ROLE_FILES = {
 }
 ROLE_NAMES = {'sender': 'QRCodeSender', 'receiver': 'QRCodeReceiver'}
 COMMON_FILES = ('build_exe.py', 'install_package.py', 'offline_wheels.py', 'requirements-build.txt',
-                'docs/USER_GUIDE.md', 'docs/BUILDING.md', 'docs/VALIDATION.md', 'docs/PROTOCOL_NOTES.md')
+                'docs/USER_GUIDE.md', 'docs/BUILDING.md', 'docs/VALIDATION.md', 'docs/PROTOCOL_NOTES.md', 'docs/RELEASE_NOTES.md')
 EXECUTABLES = ('QRSend', 'QRSendCLI', 'QRReceiver', 'QRReceiveCLI')
 
 
@@ -142,7 +142,7 @@ def build_native(target: str, output_dir: Path, arch=None):
     folder = output_dir / 'native' / target / ROLE_NAMES[role]
     shutil.copy2(ROOT / 'docs/USER_GUIDE.md', folder / '使用说明.txt')
     (folder / 'docs').mkdir(exist_ok=True)
-    for name in ('USER_GUIDE.md', 'BUILDING.md', 'VALIDATION.md', 'PROTOCOL_NOTES.md'):
+    for name in ('USER_GUIDE.md', 'BUILDING.md', 'VALIDATION.md', 'PROTOCOL_NOTES.md', 'RELEASE_NOTES.md'):
         shutil.copy2(ROOT / 'docs' / name, folder / 'docs' / name)
     write_build_info(folder, ROLE_FILES[role], target, 'portable')
     archive_folder(folder, output_dir / f'{folder.name}-{system}-{actual_arch}.zip')
@@ -168,4 +168,6 @@ def main():
 
 
 if __name__ == '__main__':
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
     main()

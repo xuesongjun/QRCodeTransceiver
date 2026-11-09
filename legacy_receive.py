@@ -206,6 +206,16 @@ class DropletAutoSaver:
             self.glass.addDroplet(droplet)
         # 显示进度条
         self._show_progress()
+        return self._save_complete() if self.glass.isDone() else False
+
+    def finish(self):
+        """旧视频结束时同样执行完整残余求解, 不把剥皮停滞误作信息不足."""
+        if self.glass is None:
+            return False
+        self.glass.solve()
+        return self._save_complete() if self.glass.isDone() else False
+
+    def _save_complete(self):
         if self.glass.isDone():
             data = self._assemble_data()
             # 检查是否为重复文件
@@ -361,4 +371,5 @@ def receive_legacy_video(path, output_dir, stop_event, progress=None):
                 progress(scanner.frame_index, scanner.total_frames, saver)
             if saver.total_files > 0 and saver.received_files >= saver.total_files:
                 break
+    saver.finish()
     return saver.saved_files
