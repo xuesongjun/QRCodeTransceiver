@@ -1,9 +1,3 @@
-# 核心依赖
-opencv-python>=4.5.0
-numpy>=1.20.0
-mss>=6.0.0
-qrcode>=7.0
-Pillow>=8.0.0
-
-# 打包 exe（可选）
-# pyinstaller>=6.0.0
+# 完整开发环境. 仅发送或接收时安装对应的分角色依赖.
+-r requirements-tx.txt
+-r requirements-rx.txt

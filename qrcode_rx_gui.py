@@ -1,666 +1,390 @@
-#!/usr/bin/env python3
-"""
-QR Code Receiver GUI - 二维码喷泉码接收端图形界面
-"""
+"""接收端小窗口: 视频/屏幕录制、续收现场、源块图和可复制补传请求."""
 
 import queue
 import sys
 import threading
-import time
-import zlib
-from pathlib import Path
-from tkinter import filedialog
-from typing import List, Optional, Set, Tuple
 import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 import cv2
-import numpy as np
-from mss import mss
+from mss.exception import ScreenShotError
 
-from fountain import Glass, str2Droplet
-
-# 压缩标记前缀
-COMPRESS_MAGIC = b"ZLIB:"
-CLIPBOARD_TEXT_LIMIT = 5 * 1024
-
-Detection = Tuple[str, Optional[Tuple[int, int, int, int]]]
-
-# QR 解码器
-qrDecoder = cv2.QRCodeDetector()
-
-
-def _rect_from_points(points: Optional[np.ndarray]) -> Optional[Tuple[int, int, int, int]]:
-    if points is None or points.size == 0:
-        return None
-    pts = points.reshape(-1, 2)
-    xs = pts[:, 0]
-    ys = pts[:, 1]
-    left = int(xs.min())
-    top = int(ys.min())
-    right = int(xs.max())
-    bottom = int(ys.max())
-    return (left, top, right - left, bottom - top)
-
-
-def qrdecode(image: np.ndarray, multi: bool = False) -> List[Detection]:
-    detections: List[Detection] = []
-    if multi:
-        try:
-            retval, decoded_infos, points, _ = qrDecoder.detectAndDecodeMulti(image)
-        except cv2.error:
-            retval = False
-        if retval:
-            for data, pts in zip(decoded_infos, points):
-                if data:
-                    detections.append((data, _rect_from_points(pts)))
-            return detections
-
-    try:
-        data, points, _ = qrDecoder.detectAndDecode(image)
-    except cv2.error:
-        data = ""
-        points = None
-    if data:
-        detections.append((data, _rect_from_points(points)))
-    return detections
-
-
-def decode_with_fallback(image: np.ndarray, multi: bool = False) -> List[Detection]:
-    detections = qrdecode(image, multi=multi)
-    if detections:
-        return detections
-    if not multi:
-        detections = qrdecode(image, multi=True)
-        if detections:
-            return detections
-    inverted = cv2.bitwise_not(image)
-    detections = qrdecode(inverted, multi=multi)
-    if detections or multi:
-        return detections
-    return qrdecode(inverted, multi=True)
-
-
-def frame_signature(image: np.ndarray) -> Tuple[Tuple[int, ...], int]:
-    return image.shape, zlib.crc32(image.tobytes())
-
-
-def is_plausible_droplet(droplet_str: str) -> bool:
-    parts = droplet_str.split("|", 3)
-    if len(parts) != 4:
-        return False
-    try:
-        seed = int(parts[0])
-        num_chunks = int(parts[1])
-        padding = int(parts[2])
-    except ValueError:
-        return False
-    return seed >= 0 and 0 < num_chunks <= 1000000 and 0 <= padding <= 4096
-
-
-def parse_droplet_header(droplet_str: str) -> Optional[Tuple[int, int, int]]:
-    parts = droplet_str.split("|", 3)
-    if len(parts) != 4:
-        return None
-    try:
-        seed = int(parts[0])
-        num_chunks = int(parts[1])
-        padding = int(parts[2])
-    except ValueError:
-        return None
-    if seed < 0 or num_chunks <= 0 or num_chunks > 1000000 or padding < 0 or padding > 4096:
-        return None
-    return seed, num_chunks, padding
-
-
-def validate_droplet(droplet_str: str, expected_num_chunks: Optional[int] = None) -> bool:
-    """验证 droplet 字符串格式是否正确"""
-    if not is_plausible_droplet(droplet_str):
-        return False
-    try:
-        parts = droplet_str.split("|", 3)
-        num_chunks = int(parts[1])
-        if expected_num_chunks is not None and num_chunks != expected_num_chunks:
-            return False
-        import base64
-        base64.b64decode(parts[3])
-        return True
-    except Exception:
-        return False
-
-
-class Decoder:
-    """喷泉码解码器"""
-
-    def __init__(self, output_dir: Path, overwrite_existing: bool = False):
-        self.output_dir = output_dir
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.overwrite_existing = overwrite_existing
-        self.glass: Optional[Glass] = None
-        self._seeds: Set[int] = set()
-        self._completed_files: Set[Tuple[int, int, bytes]] = set()
-        self.file_index = 1
-        self.last_status = ""
-        # 多文件进度跟踪
-        self.total_files: int = 0  # 总文件数（从 header 解析）
-        self.received_files: int = 0  # 已接收文件数
-        self.current_filename: str = ""  # 当前正在接收的文件名
-        self.saved_files: List[str] = []  # 已保存的文件列表
-
-    def reset(self):
-        """重置当前文件的接收状态，但保留多文件进度"""
-        self.glass = None
-        self._seeds = set()
-        self.last_status = ""
-        self.current_filename = ""
-
-    def reset_all(self):
-        """完全重置，包括多文件进度"""
-        self.reset()
-        self.total_files = 0
-        self.received_files = 0
-        self.saved_files = []
-        self._completed_files = set()
-
-    def feed(self, droplet_str: str) -> Optional[str]:
-        """处理一个 droplet，返回保存的文件名或 None"""
-        header = parse_droplet_header(droplet_str)
-        if header is None:
-            return None
-
-        seed, num_chunks, _ = header
-        if self.glass and num_chunks != self.glass.num_chunks:
-            self.reset()
-
-        if seed in self._seeds:
-            return None
-
-        try:
-            droplet = str2Droplet(droplet_str)
-        except Exception:
-            return None
-
-        self._seeds.add(droplet.seed)
-
-        if self.glass is None:
-            self.glass = Glass(droplet)
-        else:
-            self.glass.addDroplet(droplet)
-
-        if self.glass.isDone():
-            data = self._assemble_data()
-            if self._is_duplicate_file(data):
-                self.reset()
-                return None
-            filename, payload = self._split_payload(data)
-            saved_path = self._write_file(filename, payload)
-            self._mark_file_completed(data)
-            self.reset()
-            return saved_path
-
-        return None
-
-    def get_progress(self) -> Tuple[int, int, int]:
-        """返回 (已解码块数, 总块数, 已收包数)"""
-        if self.glass is None:
-            return (0, 0, 0)
-        return (self.glass.chunksDone(), self.glass.num_chunks, len(self._seeds))
-
-    def get_file_progress(self) -> Tuple[int, int]:
-        """返回 (已接收文件数, 总文件数)"""
-        return (self.received_files, self.total_files)
-
-    def is_all_done(self) -> bool:
-        """判断是否所有文件都已接收完成"""
-        return self.total_files > 0 and self.received_files >= self.total_files
-
-    def _assemble_data(self) -> bytes:
-        assert self.glass is not None
-        chunks = list(self.glass.chunks)
-        if self.glass.padding:
-            chunks[-1] = chunks[-1][:-self.glass.padding]
-        return b"".join(chunks)
-
-    def _split_payload(self, data: bytes) -> Tuple[str, bytes]:
-        """解析 payload，格式：文件名|文件编号|总文件数\n数据"""
-        idx = data.find(b"\n")
-        if idx != -1:
-            raw_header = data[:idx]
-            payload = data[idx + 1:]
-            header = raw_header.decode("utf-8", errors="ignore").strip()
-
-            # 解析新格式：文件名|文件编号|总文件数
-            parts = header.split("|")
-            if len(parts) >= 3:
-                name = parts[0]
-                try:
-                    file_index = int(parts[1])
-                    total_files = int(parts[2])
-                    # 更新多文件进度信息
-                    if total_files > 0:
-                        self.total_files = total_files
-                except ValueError:
-                    pass
-            else:
-                # 兼容旧格式：只有文件名
-                name = header
-        else:
-            payload = data
-            name = ""
-        if not name:
-            name = f"qr_output_{self.file_index}"
-        name = Path(name).name
-        self.current_filename = name
-        # 自动解压
-        payload = self._decompress(payload)
-        return name, payload
-
-    def _decompress(self, data: bytes) -> bytes:
-        if data.startswith(COMPRESS_MAGIC):
-            try:
-                compressed = data[len(COMPRESS_MAGIC):]
-                return zlib.decompress(compressed)
-            except zlib.error:
-                return data
-        return data
-
-    def _write_file(self, filename: str, payload: bytes) -> str:
-        target = self.output_dir / filename
-        if target.exists() and not self.overwrite_existing:
-            stem = target.stem
-            suffix = target.suffix
-            while True:
-                candidate = self.output_dir / f"{stem}_{time.time_ns()}{suffix}"
-                if not candidate.exists():
-                    target = candidate
-                    break
-        target.write_bytes(payload)
-        self.file_index += 1
-        self.received_files += 1
-        self.saved_files.append(str(target))
-        return str(target)
-
-    def _is_duplicate_file(self, data: bytes) -> bool:
-        import hashlib
-        if self.glass is None:
-            return False
-        content_hash = hashlib.md5(data).digest()
-        signature = (self.glass.num_chunks, self.glass.padding, content_hash)
-        return signature in self._completed_files
-
-    def _mark_file_completed(self, data: bytes):
-        import hashlib
-        if self.glass is None:
-            return
-        content_hash = hashlib.md5(data).digest()
-        signature = (self.glass.num_chunks, self.glass.padding, content_hash)
-        self._completed_files.add(signature)
+from block_map import cells
+from legacy_receive import receive_legacy_video
+from receive_pipeline import process_video
+from screen_record import record_screen
+from transfer_state import ReceiveTask, atomic_write
 
 
 class ReceiverApp:
-    """接收端 GUI 应用"""
+    def __init__(self, root):
+        self.root, self.task = root, None
+        self.worker = None
+        self.events = queue.Queue()
+        self.stop_event, self.close_event = threading.Event(), threading.Event()
+        self.selected = set()
+        self.map_cells = []
+        self.feedback_code = ''
+        self.saved = True
+        root.title('二维码接收端')
+        root.minsize(850, 720)
+        root.protocol('WM_DELETE_WINDOW', self.close)
+        body = ttk.Frame(root, padding=12)
+        body.pack(fill='both', expand=True)
+        self.actions = []
+        def button(parent, label, command):
+            item = ttk.Button(parent, text=label, command=command)
+            item.pack(side='left', padx=3, pady=3)
+            self.actions.append(item)
+        row = ttk.Frame(body)
+        row.pack(fill='x')
+        button(row, '新建/重置任务', self.new)
+        button(row, '继续原任务', self.open)
+        button(row, '保存现场', self.save)
+        button(row, '另存现场', lambda: self.save(True))
+        self.output = tk.StringVar(value=str(Path('received').resolve()))
+        row = ttk.Frame(body)
+        row.pack(fill='x')
+        ttk.Label(row, text='接收目录').pack(side='left')
+        ttk.Entry(row, textvariable=self.output).pack(side='left', fill='x', expand=True, padx=6)
+        button(row, '选择目录', self.directory)
+        row = ttk.Frame(body)
+        row.pack(fill='x')
+        button(row, '导入/追加 MP4', self.import_video)
+        button(row, '录制屏幕', self.record)
+        self.stop_button = ttk.Button(row, text='停止录制并解析 / 停止解析', command=self.stop_event.set)
+        self.stop_button.pack(side='left', padx=3)
+        button(row, '旧视频一次性解析', lambda: self.import_video(True))
+        row = ttk.Frame(body)
+        row.pack(fill='x')
+        self.fps, self.monitor = tk.StringVar(value='30'), tk.StringVar(value='1')
+        ttk.Label(row, text='录制帧/秒').pack(side='left')
+        ttk.Entry(row, textvariable=self.fps, width=6).pack(side='left', padx=5)
+        ttk.Label(row, text='屏幕编号').pack(side='left')
+        ttk.Entry(row, textvariable=self.monitor, width=4).pack(side='left', padx=5)
+        ttk.Label(row, text='录制时不识别; 停止并保存 MP4 后逐帧解析.').pack(side='left', padx=5)
+        self.status = tk.StringVar(value='导入视频建立新任务, 或点击“继续原任务”恢复现场.')
+        ttk.Label(body, textvariable=self.status, wraplength=820).pack(fill='x', pady=6)
+        self.progress = ttk.Progressbar(body)
+        self.progress.pack(fill='x')
+        self.counts = tk.StringVar(value='尚无任务')
+        ttk.Label(body, textvariable=self.counts, wraplength=820).pack(fill='x', pady=5)
+        middle = ttk.Frame(body)
+        middle.pack(fill='x')
+        self.canvas = tk.Canvas(middle, width=310, height=250, bg='white', highlightthickness=0)
+        self.canvas.pack(side='left')
+        self.canvas.bind('<Button-1>', self.select_cell)
+        self.canvas.bind('<Double-Button-1>', self.cell_details)
+        ttk.Label(middle, text='灰: 尚未恢复\n黄: 本组部分恢复\n绿: 本组全部恢复\n红: 本轮仍待补传或明确校验异常\n\n单击选择区域; 双击查看块范围/缺块编号.\n显示分组不改变真实分块.\n编号从 0 开始.', justify='left').pack(side='left', padx=15)
+        row = ttk.Frame(body)
+        row.pack(fill='x')
+        self.mode = tk.StringVar(value='自动最短')
+        self.modes = {'自动最短': 'auto', '缺块模式': 'missing', '成功模式': 'success', '位图模式': 'bitmap', '全部重发': 'all'}
+        ttk.Combobox(row, textvariable=self.mode, values=list(self.modes), state='readonly', width=12).pack(side='left')
+        button(row, '生成补传码', self.generate)
+        button(row, '从选中区域生成', lambda: self.generate(True))
+        button(row, '清除选区', self.clear_selection)
+        self.code = tk.StringVar()
+        ttk.Entry(body, textvariable=self.code, state='readonly').pack(fill='x', pady=5)
+        row = ttk.Frame(body)
+        row.pack(fill='x')
+        button(row, '复制单行补传码', self.copy)
+        button(row, '导出补传请求', self.export)
+        self.logs = tk.Text(body, height=7, wrap='word', state='disabled')
+        self.logs.pack(fill='both', expand=True, pady=5)
+        root.after(100, self.poll)
 
-    def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("QR Receiver")
-        self.root.geometry("280x200")
-        self.root.resizable(False, False)
+    def append_log(self, text):
+        self.logs.configure(state='normal')
+        self.logs.insert('end', text + '\n')
+        self.logs.see('end')
+        self.logs.configure(state='disabled')
 
-        # 状态
-        self.running = False
-        self.topmost = tk.BooleanVar(value=False)
-        self.overwrite_existing = tk.BooleanVar(value=False)
-        self.timer_running = False
-        self.timer_start_time = 0.0
-        self.timer_elapsed = 0.0
-        self.output_dir = Path("decoded")
-        self.decoder: Optional[Decoder] = None
-        self.worker_thread: Optional[threading.Thread] = None
-        self.stop_event = threading.Event()
+    def busy(self, value):
+        for action in self.actions:
+            action.configure(state='disabled' if value else 'normal')
 
-        self._build_ui()
-        self._update_status("就绪")
+    def directory(self):
+        name = filedialog.askdirectory()
+        if name:
+            self.output.set(name)
 
-    def _build_ui(self):
-        # 工具栏
-        toolbar = tk.Frame(self.root)
-        toolbar.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
+    def save(self, choose=False):
+        if self.task is None:
+            return True
+        path = self.task.state_path
+        if choose or path is None:
+            name = filedialog.asksaveasfilename(defaultextension='.qrrx', initialfile=self.task.parameters.task_id[:16] + '.qrrx')
+            if not name:
+                return False
+            path = Path(name)
+        try:
+            self.task.save(path)
+            self.saved = True
+            self.status.set(f'现场已保存: {path}')
+            self.append_log(f'{self.task.label}: 已恢复 {self.task.done}/{self.task.parameters.num_chunks}, 未恢复 {len(self.task.missing)}. 现场已保存: {path}')
+            return True
+        except OSError as exc:
+            self.saved = False
+            self.status.set(f'现场保存失败: {exc}. 请更换可写目录后重试.')
+            messagebox.showerror('现场未保存', str(exc))
+            return False
 
-        # 按钮样式
-        btn_width = 6
-
-        self.btn_start = tk.Button(toolbar, text="▶ 开始", width=btn_width, command=self._on_start)
-        self.btn_start.pack(side=tk.LEFT, padx=2)
-
-        self.btn_stop = tk.Button(toolbar, text="⏹ 停止", width=btn_width, command=self._on_stop, state=tk.DISABLED)
-        self.btn_stop.pack(side=tk.LEFT, padx=2)
-
-        self.btn_restart = tk.Button(toolbar, text="🔄 重置", width=btn_width, command=self._on_restart, state=tk.DISABLED)
-        self.btn_restart.pack(side=tk.LEFT, padx=2)
-
-        self.btn_folder = tk.Button(toolbar, text="📁 目录", width=btn_width, command=self._on_select_folder)
-        self.btn_folder.pack(side=tk.LEFT, padx=2)
-
-        # 计时器
-        timer_frame = tk.Frame(self.root)
-        timer_frame.pack(fill=tk.X, padx=10, pady=2)
-
-        tk.Label(timer_frame, text="用时:", anchor="w").pack(side=tk.LEFT)
-        self.timer_label = tk.Label(timer_frame, text="00:00.0", anchor="w", font=("Arial", 12, "bold"))
-        self.timer_label.pack(side=tk.LEFT, padx=(6, 0))
-
-        # 置顶复选框
-        topmost_frame = tk.Frame(self.root)
-        topmost_frame.pack(fill=tk.X, padx=10, pady=2)
-
-        self.chk_topmost = tk.Checkbutton(
-            topmost_frame,
-            text="窗口置顶",
-            variable=self.topmost,
-            command=self._on_topmost_changed
-        )
-        self.chk_topmost.pack(side=tk.LEFT)
-
-        self.chk_overwrite = tk.Checkbutton(
-            topmost_frame,
-            text="同名覆写",
-            variable=self.overwrite_existing,
-            command=self._on_overwrite_changed
-        )
-        self.chk_overwrite.pack(side=tk.LEFT, padx=(10, 0))
-
-        # 文件进度标签
-        file_progress_frame = tk.Frame(self.root)
-        file_progress_frame.pack(fill=tk.X, padx=10, pady=2)
-
-        self.file_progress_label = tk.Label(file_progress_frame, text="文件: 0/0", anchor="w")
-        self.file_progress_label.pack(side=tk.LEFT)
-
-        # 进度条（当前文件块进度）
-        progress_frame = tk.Frame(self.root)
-        progress_frame.pack(fill=tk.X, padx=10, pady=5)
-
-        self.progress_var = tk.DoubleVar(value=0)
-        self.progress_bar = tk.Canvas(progress_frame, height=20, bg="white", highlightthickness=1, highlightbackground="gray")
-        self.progress_bar.pack(fill=tk.X)
-
-        # 状态栏
-        status_frame = tk.Frame(self.root)
-        status_frame.pack(fill=tk.X, padx=10, pady=2)
-
-        self.status_label = tk.Label(status_frame, text="就绪", anchor="w")
-        self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        self.dir_label = tk.Label(status_frame, text=f"📁 {self.output_dir}", anchor="e", fg="gray")
-        self.dir_label.pack(side=tk.RIGHT)
-
-    def _update_status(self, text: str):
-        self.status_label.config(text=text)
-
-    def _format_elapsed(self, seconds: float) -> str:
-        seconds = max(0.0, seconds)
-        minutes = int(seconds // 60)
-        whole_seconds = int(seconds % 60)
-        tenths = int((seconds - int(seconds)) * 10)
-        return f"{minutes:02d}:{whole_seconds:02d}.{tenths}"
-
-    def _update_timer_label(self):
-        if self.timer_running:
-            elapsed = time.monotonic() - self.timer_start_time
-        else:
-            elapsed = self.timer_elapsed
-        self.timer_label.config(text=self._format_elapsed(elapsed))
-
-    def _poll_timer(self):
-        if not self.timer_running:
+    def new(self):
+        if not self.save():
             return
-        self.timer_elapsed = time.monotonic() - self.timer_start_time
-        self._update_timer_label()
-        self.root.after(100, self._poll_timer)
+        self.task = None
+        self.selected.clear()
+        self.code.set('')
+        self.feedback_code = ''
+        self.draw([])
+        self.counts.set('尚无任务')
+        self.status.set('已新建空任务. 原任务仍保存在原现场文件中; 下一次导入将建立新任务.')
 
-    def _start_timer(self):
-        self.timer_elapsed = 0.0
-        self.timer_start_time = time.monotonic()
-        self.timer_running = True
-        self._poll_timer()
-
-    def _stop_timer(self):
-        if self.timer_running:
-            self.timer_elapsed = time.monotonic() - self.timer_start_time
-            self.timer_running = False
-        self._update_timer_label()
-
-    def _reset_timer(self):
-        self.timer_running = False
-        self.timer_start_time = 0.0
-        self.timer_elapsed = 0.0
-        self._update_timer_label()
-
-    @staticmethod
-    def _decode_clipboard_text(data: bytes) -> Optional[str]:
-        for encoding in ("utf-8-sig", "gb18030"):
+    def open(self):
+        if not self.save():
+            return
+        name = filedialog.askopenfilename(filetypes=[('接收现场', '*.qrrx')])
+        if name:
             try:
-                return data.decode(encoding)
-            except UnicodeDecodeError:
-                pass
-        return None
+                self.task = ReceiveTask.load(Path(name))
+                if self.task.verified:
+                    self.task.write_output(Path(self.output.get()))
+                self.task.save(Path(name))
+                self.saved = True
+                self.selected.clear()
+                self.code.set('')
+                self.feedback_code = ''
+                self.update_task()
+                self.logs.configure(state='normal')
+                self.logs.delete('1.0', 'end')
+                self.logs.configure(state='disabled')
+                for event in self.task.events[-30:]:
+                    self.append_log(self.event_text(event))
+                if self.task.integrity_error:
+                    next_step = self.task.integrity_error
+                elif self.task.verified:
+                    next_step = f'文件校验通过并已保存: {self.task.output_path}'
+                else:
+                    next_step = '可追加视频或生成最新补传码.'
+                self.status.set('现场已恢复并保存. ' + next_step)
+            except (OSError, ValueError) as exc:
+                self.saved = False
+                self.status.set(f'恢复或保存现场失败: {exc}')
+                messagebox.showerror('恢复或保存现场失败', str(exc))
 
-    def _copy_small_single_txt_to_clipboard(self, path: str, file_total: int) -> bool:
-        if file_total > 1:
-            return False
+    def update_task(self):
+        if self.task is not None:
+            self.counts.set(f'{self.task.label} | 任务 {self.task.parameters.task_id[:16]} | 总源块 {self.task.parameters.num_chunks}, 已恢复 {self.task.done}, 未恢复 {len(self.task.missing)}')
+            self.draw(cells(self.task))
 
-        file_path = Path(path)
-        if file_path.suffix.lower() != ".txt":
-            return False
+    def event_text(self, event):
+        action = event['action']
+        label = event.get('file', self.task.label)
+        counts = (f"总源块 {event['total']}, 已恢复 {event['restored']}, 未恢复 {event['missing']}"
+                  if 'total' in event else '')
+        if action == '视频解析结束':
+            return (f"{label}: {action}, {counts}, 本轮新增 {event['new_blocks']}. "
+                    f"{event['error'] or '解析轮次结束'}. 下一步: {event['next_step']}.")
+        if action == '生成补传请求':
+            return (f"{label}: {counts}; 请求 {event['requested']} 个源块, "
+                    f"{event['mode']}, {event['code_length']} 字符. 请复制补传码到发送端.")
+        if action == '现场已保存':
+            return f"{label}: {counts}. 现场已保存: {event['path']}"
+        return f"{label}: {action}: {event['error']}"
 
-        try:
-            data = file_path.read_bytes()
-        except OSError:
-            return False
+    def draw(self, states):
+        self.map_cells = states
+        self.canvas.delete('all')
+        palette = {'gray': '#b8bec7', 'yellow': '#f5c84b', 'green': '#48b879', 'red': '#ed8882'}
+        for index, cell in enumerate(states):
+            x, y = index % 10 * 30, index // 10 * 24
+            # 选区只影响反馈范围, 不改变任何接收状态.
+            self.canvas.create_rectangle(x + 2, y + 2, x + 28, y + 22, fill=palette[cell.color], outline='#111827' if index in self.selected else 'white', width=3 if index in self.selected else 1)
 
-        if len(data) > CLIPBOARD_TEXT_LIMIT:
-            return False
-
-        text = self._decode_clipboard_text(data)
-        if text is None:
-            return False
-
-        try:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(text)
-            self.root.update_idletasks()
-        except tk.TclError:
-            return False
-        return True
-
-    def _update_file_progress(self, received: int, total: int):
-        """更新文件进度显示"""
-        if total > 0:
-            self.file_progress_label.config(text=f"文件: {received}/{total}")
-        else:
-            self.file_progress_label.config(text="文件: 0/0")
-
-    def _update_progress(self, done: int, total: int, received: int):
-        if total <= 0:
-            ratio = 0
-        else:
-            ratio = done / total
-
-        self.progress_bar.delete("all")
-        width = self.progress_bar.winfo_width()
-        height = self.progress_bar.winfo_height()
-
-        # 绘制进度条
-        fill_width = int(width * ratio)
-        if fill_width > 0:
-            self.progress_bar.create_rectangle(0, 0, fill_width, height, fill="#4CAF50", outline="")
-
-        # 绘制文字
-        percent = int(ratio * 100)
-        text = f"{percent}% 解码 {done}/{total} 新包 {received}"
-        self.progress_bar.create_text(width // 2, height // 2, text=text, fill="black")
-
-    def _on_start(self):
-        if self.running:
-            return
-
-        self.running = True
-        self.stop_event.clear()
-        self.decoder = Decoder(self.output_dir, overwrite_existing=self.overwrite_existing.get())
-        self._start_timer()
-
-        self.btn_start.config(state=tk.DISABLED)
-        self.btn_stop.config(state=tk.NORMAL)
-        self.btn_restart.config(state=tk.NORMAL)
-        self.btn_folder.config(state=tk.DISABLED)
-
-        self._update_status("等待检测二维码...")
-
-        self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
-        self.worker_thread.start()
-
-        self._poll_progress()
-
-    def _on_stop(self):
-        self.running = False
-        self.stop_event.set()
-        self._stop_timer()
-
-        self.btn_start.config(state=tk.NORMAL)
-        self.btn_stop.config(state=tk.DISABLED)
-        self.btn_restart.config(state=tk.DISABLED)
-        self.btn_folder.config(state=tk.NORMAL)
-
-        self._update_status("已停止")
-
-    def _on_restart(self):
-        if self.decoder:
-            self.decoder.reset_all()
-        self._reset_timer()
-        if self.running:
-            self._start_timer()
-        self._update_status("已重置，等待新的传输...")
-        self._update_progress(0, 0, 0)
-        self._update_file_progress(0, 0)
-
-    def _on_select_folder(self):
-        folder = filedialog.askdirectory(initialdir=str(self.output_dir), title="选择接收文件目录")
-        if folder:
-            self.output_dir = Path(folder)
-            self.dir_label.config(text=f"📁 {self.output_dir.name}")
-
-    def _on_topmost_changed(self):
-        """切换窗口置顶状态"""
-        self.root.attributes("-topmost", self.topmost.get())
-
-    def _on_overwrite_changed(self):
-        if self.decoder:
-            self.decoder.overwrite_existing = self.overwrite_existing.get()
-
-    def _poll_progress(self):
-        if not self.running:
-            return
-
-        if self.decoder:
-            done, total, received = self.decoder.get_progress()
-            file_received, file_total = self.decoder.get_file_progress()
-
-            # 更新文件进度
-            self._update_file_progress(file_received, file_total)
-
-            if total > 0:
-                current_file = self.decoder.current_filename or "未知"
-                self._update_status(f"接收中: {current_file}")
-                self._update_progress(done, total, received)
-            elif file_received > 0 and self.decoder.is_all_done():
-                self._update_status(f"全部完成！共 {file_received} 个文件")
-
-        self.root.after(100, self._poll_progress)
-
-    def _worker_loop(self):
-        """后台工作线程"""
-        with mss() as sct:
-            monitors = sct.monitors
-            monitor = monitors[1] if len(monitors) > 1 else monitors[0]
-
-            region = {
-                "left": monitor["left"],
-                "top": monitor["top"],
-                "width": monitor["width"],
-                "height": monitor["height"]
-            }
-            last_frame_signature: Optional[Tuple[Tuple[int, ...], int]] = None
-
-            while not self.stop_event.is_set():
-                try:
-                    # 截屏
-                    raw = sct.grab(region)
-                    frame = np.array(raw)
-                    gray = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
-
-                    signature = frame_signature(gray)
-                    if signature == last_frame_signature:
-                        time.sleep(0.01)
-                        continue
-                    last_frame_signature = signature
-
-                    # 全屏定位阶段允许多码检测；定位后单码优先，多码兜底。
-                    is_full_screen = region["width"] == monitor["width"]
-                    detections = decode_with_fallback(gray, multi=is_full_screen)
-
-                    for barcode, rect in detections:
-                        barcode = barcode.strip()
-                        if not barcode:
-                            continue
-
-                        # 自动缩小区域
-                        if rect and region["width"] == monitor["width"]:
-                            padding = 50
-                            region = {
-                                "left": monitor["left"] + rect[0] - padding,
-                                "top": monitor["top"] + rect[1] - padding,
-                                "width": rect[2] + padding * 2,
-                                "height": rect[3] + padding * 2
-                            }
-                            last_frame_signature = None
-
-                        if self.decoder:
-                            saved = self.decoder.feed(barcode)
-                            if saved:
-                                self.root.after(0, lambda s=saved: self._on_file_saved(s))
-
-                    if not detections:
-                        time.sleep(0.02)
-
-                except Exception as e:
-                    time.sleep(0.1)
-
-    def _on_file_saved(self, path: str):
-        """文件保存后的回调，不再弹窗，仅更新状态"""
-        filename = Path(path).name
-        if self.decoder:
-            file_received, file_total = self.decoder.get_file_progress()
-            clipboard_suffix = ""
-            if self._copy_small_single_txt_to_clipboard(path, file_total):
-                clipboard_suffix = "，已复制到剪贴板"
-            if file_total > 0:
-                self._update_status(f"已保存 [{file_received}/{file_total}]: {filename}{clipboard_suffix}")
+    def select_cell(self, event):
+        index = event.y // 24 * 10 + event.x // 30
+        if 0 <= index < len(self.map_cells):
+            if index in self.selected:
+                self.selected.remove(index)
             else:
-                self._update_status(f"已保存: {filename}{clipboard_suffix}")
-            self._update_file_progress(file_received, file_total)
-            if file_total <= 0 or self.decoder.is_all_done():
-                self._stop_timer()
-        else:
-            self._update_status(f"已保存: {filename}")
-        self._update_progress(0, 0, 0)
+                self.selected.add(index)
+            self.draw(self.map_cells)
 
-    def run(self):
-        self.root.mainloop()
+    def cell_details(self, event):
+        index = event.y // 24 * 10 + event.x // 30
+        if 0 <= index < len(self.map_cells):
+            cell = self.map_cells[index]
+            window = tk.Toplevel(self.root)
+            window.title(f'源块 {cell.start} - {cell.end - 1}')
+            text = tk.Text(window, width=70, height=16, wrap='word')
+            text.pack(fill='both', expand=True)
+            text.insert('end', f'范围 [{cell.start}, {cell.end}), 已恢复 {cell.restored}/{cell.end - cell.start}\n{cell.reason}\n未恢复块编号:\n' + ', '.join(map(str, cell.missing)))
+            text.configure(state='disabled')
+
+    def clear_selection(self):
+        self.selected.clear()
+        self.draw(self.map_cells)
+
+    def generate(self, selected=False):
+        if self.task is None:
+            messagebox.showinfo('暂无任务', '请先导入视频或恢复接收现场.')
+            return
+        scope = None
+        if selected:
+            if not self.selected:
+                messagebox.showinfo('选择区域', '先单击分块图中需要补传的区域.')
+                return
+            if self.modes[self.mode.get()] == 'all':
+                messagebox.showinfo('选择描述方式', '全部重发覆盖整个任务; 区域补传请选择自动、缺块、成功或位图模式.')
+                return
+            scope = {block for index in self.selected for block in range(self.map_cells[index].start, self.map_cells[index].end)}
+        try:
+            feedback = self.task.feedback(self.modes[self.mode.get()], scope)
+            if self.task.verified:
+                self.task.write_output(Path(self.output.get()))
+            self.feedback_code = feedback.code
+            self.code.set(feedback.code)
+            saved = self.save()
+            if feedback.requested:
+                next_step = '下一步: 复制单行补传码到发送端, 打开原发送任务后补发; 再追加补传视频.'
+            elif self.task.verified:
+                next_step = f'无需补传. 文件校验通过并已保存: {self.task.output_path}'
+            else:
+                next_step = '所选区域无需补传; 任务其他区域仍有未恢复源块, 可选择其他区域或追加视频.'
+            text = (f'{self.task.label}: 总源块 {self.task.parameters.num_chunks}, 已恢复 {self.task.done}, 未恢复 {len(self.task.missing)}. '
+                    f'请求 {len(feedback.requested)} 个源块, {feedback.description}, {len(feedback.code)} 字符. '
+                    + ('现场已保存. ' if saved else '现场未保存成功. ')
+                    + next_step)
+            self.status.set(text)
+            self.append_log(text)
+            self.update_task()
+        except (OSError, ValueError) as exc:
+            messagebox.showerror('不能生成补传码', str(exc))
+
+    def copy(self):
+        if self.feedback_code:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self.feedback_code)
+            self.status.set(f'已复制单行补传码, {len(self.feedback_code)} 字符. 请粘贴到发送端的原任务.')
+
+    def export(self):
+        if not self.feedback_code:
+            return
+        name = filedialog.asksaveasfilename(defaultextension='.qrreq')
+        if name:
+            try:
+                atomic_write(Path(name), (self.feedback_code + '\n').encode('ascii'))
+                self.append_log(f'补传请求已导出: {name}, {len(self.feedback_code)} 字符.')
+            except OSError as exc:
+                messagebox.showerror('请求导出失败', str(exc))
+
+    def import_video(self, legacy=False):
+        name = filedialog.askopenfilename(title='旧视频一次性解析' if legacy else '导入/追加同一任务的视频', filetypes=[('视频', '*.mp4 *.mkv *.avi *.mov'), ('所有文件', '*')])
+        if name:
+            self.launch(Path(name), legacy=legacy)
+
+    def record(self):
+        try:
+            fps, monitor = float(self.fps.get()), int(self.monitor.get())
+            if not 1 <= fps <= 120 or monitor < 1:
+                raise ValueError('录制帧率为 1-120, 屏幕编号为正整数.')
+        except ValueError as exc:
+            messagebox.showerror('录制参数有误', str(exc))
+            return
+        name = filedialog.asksaveasfilename(title='录制后保留这个 MP4', defaultextension='.mp4')
+        if name:
+            self.launch(Path(name), recording=(fps, monitor))
+
+    def launch(self, video, legacy=False, recording=None):
+        self.stop_event.clear()
+        self.saved = False if self.task is not None else True
+        self.code.set('')
+        self.feedback_code = ''
+        self.busy(True)
+        output = Path(self.output.get())
+        task = self.task
+        self.status.set('正在录制屏幕, 点击停止后保存并解析...' if recording else '正在顺序解析视频, 处理慢也不会跳过未处理帧...')
+        def work():
+            try:
+                if recording:
+                    count, elapsed = record_screen(video, self.stop_event, *recording, overwrite=True)
+                    self.events.put(('log', f'屏幕视频已保存: {video}; {count} 帧 / {elapsed:.1f} 秒, 实际 {count / elapsed:.1f} 帧/秒.'))
+                    if self.close_event.is_set():
+                        self.events.put(('done', None))
+                        return
+                    self.stop_event.clear()
+                    self.events.put(('status', '录制已保存, 正在使用同一套逐帧解析流程...'))
+                if legacy:
+                    files = receive_legacy_video(video, output, self.stop_event)
+                    self.events.put(('log', f'旧视频一次性解析结束: 保存 {len(files)} 个文件. 未并入新任务, 不提供现场/补传.'))
+                    self.events.put(('done', None))
+                else:
+                    def progress(frame, total, current):
+                        self.events.put(('progress', (frame, total, current.done if current else 0, current.parameters.num_chunks if current else 0, cells(current) if current else [])))
+                    result = process_video(video, task, output, self.stop_event, progress=progress)
+                    self.events.put(('done', result))
+            except (OSError, ValueError, cv2.error, ScreenShotError) as exc:
+                self.events.put(('error', str(exc)))
+        self.worker = threading.Thread(target=work)
+        self.worker.start()
+
+    def close(self):
+        if self.worker is not None:
+            self.close_event.set()
+            self.stop_event.set()
+            self.status.set('正在停止并保存现场/录制视频, 完成后关闭...')
+        elif self.save():
+            self.root.destroy()
+
+    def poll(self):
+        while not self.events.empty():
+            kind, value = self.events.get_nowait()
+            if kind == 'progress':
+                frame, total, done, chunks, states = value
+                self.progress.configure(maximum=max(total, 1), value=frame)
+                self.counts.set(f'视频帧 {frame}/{total}; 已恢复源块 {done}/{chunks}')
+                self.draw(states)
+            elif kind in ('status', 'log'):
+                self.status.set(value)
+                if kind == 'log':
+                    self.append_log(value)
+            elif kind == 'error':
+                self.status.set('处理失败: ' + value)
+                self.append_log('失败: ' + value)
+                self.close_event.clear()
+                messagebox.showerror('处理失败', value)
+            elif value is not None:
+                self.task, self.saved = value.task, value.state_saved
+                self.status.set(value.text())
+                self.append_log(value.text())
+                self.update_task()
+                if value.error:
+                    self.close_event.clear()
+                    messagebox.showerror('处理未成功', value.text())
+        if self.worker is not None and not self.worker.is_alive():
+            self.worker = None
+            self.busy(False)
+            if self.close_event.is_set():
+                if self.save():
+                    self.root.destroy()
+                    return
+                self.close_event.clear()
+        self.root.after(100, self.poll)
 
 
 def main():
-    app = ReceiverApp()
-    app.run()
+    root = tk.Tk()
+    if '--self-test' in sys.argv:
+        root.withdraw()
+        ReceiverApp(root)
+        root.update()
+        root.destroy()
+        return
+    ReceiverApp(root)
+    root.mainloop()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

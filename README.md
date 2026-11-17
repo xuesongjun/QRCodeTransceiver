@@ -1,227 +1,46 @@
-# QR Code Transceiver - 二维码喷泉码传输工具
+# QRCodeTransceiver
 
-通过屏幕显示和截屏识别 QR 码，实现文件的单向传输。使用喷泉码（LT 码）确保可靠传输，无需反馈通道。
+通过动态二维码传文件, 支持 Windows/Linux 双端窗口、命令行、MP4 逐帧接收、保存续收和定向补传.
+上游仓库: https://github.com/xuesongjun/QRCodeTransceiver
 
-## 特性
+新传输协议 QT2 每包绑定具体任务、分块参数和校验. 每轮先覆盖全部源块, 再发新的 LT 喷泉修复包.
+漏包不导致后续编码包失效; 译码器先剥皮, 再用 GF(2) 高斯消元求解残余方程. 只有完整编码数据和最终文件 SHA-256 校验都通过才标记完成.
 
-- **喷泉码传输**：基于 LT 码（Luby Transform），支持无反馈单向传输
-- **自动压缩**：使用 zlib 压缩，大幅减少传输数据量
-- **自动定位**：RX 自动检测屏幕上的二维码位置
-- **实时模式**：TX 默认实时生成新的 droplet，提高传输效率
-- **进度显示**：RX 显示实时进度条
-- **多线程截屏**：RX 使用独立线程截屏，提高处理速度
-- **GUI 接收端**：提供图形界面版本，可打包为独立 exe
-- **离线安装**：支持在无网络环境下安装部署
-- **多文件传输**：支持文件列表和通配符批量传输
+## 新手入口
 
-## 快速安装
+完整流程见 [使用说明](docs/USER_GUIDE.md). 四种角色的安装、构建见 [构建说明](docs/BUILDING.md).
+[Release 下载](https://github.com/xuesongjun/QRCodeTransceiver/releases) 提供正式附件, 本地构建在 `dist/current`, 实际验收范围见 [验证记录](docs/VALIDATION.md).
 
-### 在线安装（有网络）
+| 角色 | Windows 便携入口 | Linux 便携入口 | Python 窗口 / 命令行 |
+|---|---|---|---|
+| 发送 | QRSend.exe / QRSendCLI.exe | QRSend / QRSendCLI | qrcode_tx_gui.py / qrcode_tx.py |
+| 接收 | QRReceiver.exe / QRReceiveCLI.exe | QRReceiver / QRReceiveCLI | qrcode_rx_gui.py / qrcode_rx.py |
 
-```bash
-# 创建虚拟环境
-python -m venv venv
+两端都有小窗口; 便携包请完整解压, 保留 `_internal`. 源码包保留脚本方式, 离线源码包附带匹配的 Python wheels.
+Windows x64 和 Linux x64 成品的验证情况以验证记录为准. Windows x86 仅提供构建工程和离线库包; Linux x86 缺少当前固定依赖的预编译库, 暂无成品.
 
-# 激活虚拟环境
-# Linux/Mac:
-source venv/bin/activate
-# Windows:
-venv\Scripts\activate
+## 使用
 
-# 安装依赖
-pip install -r requirements.txt
-```
-
-### 离线安装（无网络的 Linux 机器）
-
-#### 步骤 1：在有网络的 Windows 机器上下载依赖包
+1. 发送端新建任务并保存 `.qrtx`, 开始发送; 每轮进度条有数字和颜色, 能看出开头、末尾及循环.
+2. 接收端导入 MP4, 或录制屏幕、停止并保存后解析. 二维码可移动, 局部定位失败会搜索同一完整帧.
+3. 不完整时自动保存 `.qrrx`. 下次选择“继续原任务”, 或继续追加视频; 重复视频/包不增加恢复进度.
+4. 生成单行补传码, 复制/导出到发送端, 打开原 `.qrtx` 校验后只补发所需源块.
+5. 接收端追加补传视频, 完成校验并保存文件. 可多轮补传; “新建/重置”与“继续原任务”明确分开.
 
 ```bash
-python download_packages.py
-```
-
-按提示选择目标 Linux 平台和 Python 版本。
-
-#### 步骤 2：复制文件到目标机器
-
-将以下文件/目录复制到目标 Linux 机器：
-
-```
-qrcode_transceiver/
-├── offline_packages/     # 离线包目录
-├── install_offline.sh    # 安装脚本
-├── requirements.txt
-├── qrcode_tx.py
-├── qrcode_rx.py
-├── fountain.py
-└── ...
-```
-
-#### 步骤 3：在目标机器上安装
-
-```bash
-chmod +x install_offline.sh
-./install_offline.sh
-```
-
-#### 步骤 4：使用
-
-```bash
-source venv/bin/activate
-python qrcode_rx.py
-```
-
-## 使用方法
-
-### 发送端 (TX)
-
-```bash
-python qrcode_tx.py <文件路径> [选项]
-```
-
-Linux 下也可以直接用仓库里的 `qrtx`：
-
-```bash
-./qrtx myfile.zip
-```
-
-如果仓库不在当前目录，可先用 `setenv QRTX_ROOT /path/to/qrcode_transceiver` 指向项目根目录。
-
-#### 参数说明
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `filename` | 需要传输的文件路径，支持通配符 | (与 -f 二选一) |
-| `-f, --file-list` | 文件列表文件，每行一个文件路径 | - |
-| `-o, --output` | 二维码图片输出目录 | `droplets` |
-| `--chunk-size` | 每个分块的字节数 | `512` |
-| `--extra` | 额外生成 droplet 的比例 | `0.5` (50%) |
-| `--size` | 二维码图片边长（像素） | `800` |
-| `--border` | 二维码静区宽度（模块数） | `4` |
-| `-i, --interval` | 播放间隔（毫秒） | `30` |
-| `--error-correction` | QR 纠错等级，L/M/Q/H，等级越高越稳但容量越低 | `M` |
-| `--no-display` | 仅生成图片，不弹出播放窗口 | - |
-| `--no-live` | 禁用实时模式，使用预生成模式 | - |
-| `--no-compress` | 禁用自动压缩 | - |
-
-#### 示例
-
-```bash
-# 基本用法（默认实时模式）
-python qrcode_tx.py myfile.zip
-
-# 预生成模式
-python qrcode_tx.py bigfile.exe --no-live
-
-# 自定义参数
-python qrcode_tx.py myfile.zip --size 700 -i 100
-
-# 激进吞吐参数，只有在屏幕清晰、RX 识别稳定时使用
-python qrcode_tx.py myfile.zip --chunk-size 1536 -i 20 --error-correction L
-
-# 禁用压缩
-python qrcode_tx.py already_compressed.zip --no-compress
-
-# 多文件：使用通配符（注意：通配符必须加引号，否则会被 shell 展开）
-python qrcode_tx.py "*.txt"
-
-# 多文件：使用文件列表
-python qrcode_tx.py -f files.list
-```
-
-#### 文件列表格式
-
-文件列表 (`files.list`) 每行一个文件路径，支持 `#` 开头的注释：
-
-```
-# 要传输的文件列表
-document.pdf
-data/config.json
-logs/app.log
-```
-
-### 接收端 (RX)
-
-#### 命令行版本
-
-```bash
-python qrcode_rx.py [选项]
-```
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--monitor` | mss 的 monitor 索引 | `1` (主屏) |
-| `--region` | 指定截屏区域 (LEFT TOP WIDTH HEIGHT) | 自动检测 |
-| `--no-auto-region` | 禁用自动定位二维码区域 | - |
-| `-i, --interval` | 截屏间隔（秒） | `0.02` |
-| `--dedup` | 按 seed 去重，避免重复处理 | - |
-| `--quiet` | 静默模式，减少输出 | - |
-| `--debug` | 调试模式，输出详细信息 | - |
-| `--output-dir` | 接收文件保存目录 | `decoded` |
-| `--no-save` | 仅输出 droplet，不保存文件 | - |
-
-#### GUI 版本
-
-```bash
+python qrcode_tx_gui.py
 python qrcode_rx_gui.py
+# 命令行创建并冻结任务
+python qrcode_tx.py myfile.zip --task myfile.qrtx
+# 接收后即使不完整也保存现场; 不完整退出码为 2
+python qrcode_rx.py --video first.mp4 --task myfile.qrrx --request-out repair.qrreq
+python qrcode_tx.py --task myfile.qrtx --repair repair.qrreq
+python qrcode_rx.py --video repair.mp4 --task myfile.qrrx
+# 旧格式视频的独立一次性入口
+python qrcode_rx.py --legacy --video old.mp4
 ```
 
-或直接运行打包好的 `QRReceiver.exe`。
-
-GUI 界面功能：
-- **▶ 开始** - 开始接收
-- **⏹ 停止** - 停止接收
-- **🔄 重置** - 清除当前接收状态，准备接收新文件
-- **📁 目录** - 选择接收文件保存目录
-- **同名覆写** - 收到同名文件时直接覆盖已有文件
-- **小文本复制** - 单个 `.txt` 文件不超过 5KB 时，保存后自动复制内容到剪贴板
-
-### 打包 exe
-
-```bash
-# 安装 pyinstaller
-pip install pyinstaller
-
-# 打包
-python build_exe.py
-```
-
-生成的 exe 位于 `dist/QRReceiver.exe`。
-
-## 文件说明
-
-| 文件 | 说明 |
-|------|------|
-| `qrcode_tx.py` | 发送端程序 |
-| `qrcode_rx.py` | 接收端程序（命令行） |
-| `qrcode_rx_gui.py` | 接收端程序（GUI） |
-| `fountain.py` | 喷泉码核心实现 |
-| `build_exe.py` | exe 打包脚本 |
-| `download_packages.py` | 离线包下载脚本 |
-| `install_offline.sh` | 离线安装脚本（Linux） |
-| `requirements.txt` | 依赖列表 |
-
-## 原理说明
-
-### 喷泉码 (LT 码)
-
-喷泉码是一种无速率纠删码，具有以下特点：
-
-- **无反馈**：发送端不需要知道接收端的状态
-- **无限生成**：可以生成任意数量的编码包
-- **冗余容错**：接收端只需要收到略多于原始分块数的包即可恢复数据
-
-### 鲁棒孤波分布
-
-本项目使用鲁棒孤波分布 (Robust Soliton Distribution) 来选择每个 droplet 包含的源块数量，这是 LT 码的关键组成部分，能够在保证译码成功率的同时最小化所需的 droplet 数量。
-
-## 注意事项
-
-1. **QR 码大小**：`--size` 参数影响 QR 码的可识别性。太小可能导致识别率下降。
-2. **播放间隔**：`-i` 参数需要根据 RX 的处理能力调整。间隔太短可能导致丢包。
-3. **压缩效果**：对于已压缩的文件（如 .zip, .jpg），压缩可能无效，会自动跳过。
-4. **大文件传输**：默认优先保证识别稳定。若 RX 长时间停在“等待检测二维码”，优先降低 `--chunk-size`，例如 `--chunk-size 512`；识别稳定后再尝试减小 `-i` 或降低纠错等级。
-
-## License
-
-MIT
+开发依赖: `python -m pip install -r requirements.txt`; 测试: `python -m unittest discover -s tests -v`.
+新发送端统一为单文件任务, 多文件先打成 ZIP; 删除旧的多文件交织/预生成循环契约. 用户要求的旧 MP4 一次性解析入口保留, 不合并新任务.
+[协议说明及后续节奏同步讨论](docs/PROTOCOL_NOTES.md) 区分已实现内容与研究方向.
+正式交付优先 Windows x64 / Linux x64. 推送 v* 标签后, CI 完成双端构建、验收和源码/离线包准备, 再发布 [GitHub Release](https://github.com/xuesongjun/QRCodeTransceiver/releases).

@@ -1,0 +1,4 @@
+# 接收端. Windows 成品使用 CPython 3.12 x64 构建.
+opencv-python==5.0.0.93
+numpy==2.2.6
+mss==10.2.0

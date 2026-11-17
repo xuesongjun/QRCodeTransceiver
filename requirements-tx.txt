@@ -1,0 +1,6 @@
+# Windows/Linux 发送端, CPython 3.10-3.12. 源码运行的 tkinter 由操作系统提供.
+qrcode==7.4.2
+Pillow==10.4.0
+pypng==0.20220715.0
+typing_extensions==4.13.2
+colorama==0.4.6

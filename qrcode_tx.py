@@ -1,460 +1,80 @@
+"""发送命令行: 冻结任务、定向补传、导出一轮二维码或打开播放器."""
+
 import argparse
-import glob
 import math
-import zlib
+import sys
+import time
 from pathlib import Path
-from typing import List, Tuple
 
-import qrcode
-from qrcode.exceptions import DataOverflowError
-from PIL import Image
-
-from fountain import Fountain
-
-# 压缩标记前缀
-COMPRESS_MAGIC = b"ZLIB:"
-
-ERROR_CORRECTION_LEVELS = {
-    "L": qrcode.constants.ERROR_CORRECT_L,
-    "M": qrcode.constants.ERROR_CORRECT_M,
-    "Q": qrcode.constants.ERROR_CORRECT_Q,
-    "H": qrcode.constants.ERROR_CORRECT_H,
-}
+from qr_render import ERROR_CORRECTION_LEVELS, build_qr
+from transfer_state import SendTask
 
 
-def build_qr(
-    droplet: str,
-    size: int = 512,
-    border: int = 4,
-    error_correction: int = qrcode.constants.ERROR_CORRECT_M,
-) -> Image.Image:
-    qr = qrcode.QRCode(
-        version=None,
-        error_correction=error_correction,
-        box_size=10,
-        border=border,
-    )
-    qr.add_data(droplet)
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('filename', nargs='?', type=Path, help='一个文件; 多文件请先打成 ZIP')
+    parser.add_argument('--task', type=Path, help='已有 .qrtx 发送任务, 或新任务保存位置')
+    parser.add_argument('--repair', help='单行补传码或 .qrreq 请求文件路径')
+    parser.add_argument('--chunk-size', type=int, default=256)
+    parser.add_argument('--no-compress', action='store_true')
+    parser.add_argument('--extra', type=float, default=0.5)
+    parser.add_argument('--size', type=int, default=600)
+    parser.add_argument('--border', type=int, default=4)
+    parser.add_argument('--error-correction', choices=ERROR_CORRECTION_LEVELS, default='M')
+    parser.add_argument('-i', '--interval', type=int, default=150)
+    parser.add_argument('--no-display', action='store_true', help='导出一轮 PNG 后退出')
+    parser.add_argument('-o', '--output', type=Path, default=Path('droplets'))
+    args = parser.parse_args(argv)
+    if args.extra < 0 or not math.isfinite(args.extra) or args.interval < 1 or args.size < 100 or args.border < 4:
+        parser.error('冗余应非负, 显示间隔为正, 尺寸至少 100, 静区至少 4')
     try:
-        qr.make(fit=True)
-    except DataOverflowError as exc:
-        raise ValueError(
-            "当前 QR 参数无法容纳单个 droplet，请降低 --chunk-size "
-            "或降低 --error-correction。"
-        ) from exc
-    base_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-    if size:
-        # 将二维码缩放到指定尺寸
-        base_img = base_img.resize((size, size), Image.Resampling.NEAREST)
-    return base_img
-
-
-def display_sequence(entries: List[Tuple[str, str, Image.Image]], interval_ms: int):
-    """循环播放预生成的二维码序列"""
-    import tkinter as tk
-    from PIL import ImageTk
-
-    root = tk.Tk()
-    root.title("QR droplet 播放器")
-    root.configure(bg="white")
-
-    # 获取屏幕尺寸
-    screen_width = root.winfo_screenwidth()
-    screen_height = root.winfo_screenheight()
-
-    # 获取图片尺寸
-    img_width = entries[0][2].width if entries else 512
-    img_height = entries[0][2].height if entries else 512
-
-    # 计算窗口尺寸（包含边距和信息标签）
-    window_width = img_width + 40
-    window_height = img_height + 80
-
-    # 计算居中位置
-    x = (screen_width - window_width) // 2
-    y = (screen_height - window_height) // 2
-
-    # 设置窗口位置
-    root.geometry(f"{window_width}x{window_height}+{x}+{y}")
-    root.resizable(False, False)
-
-    label = tk.Label(root, bg="white")
-    label.pack(padx=10, pady=10)
-    info = tk.Label(root, bg="white", font=("Arial", 12))
-    info.pack(pady=(0, 10))
-
-    tk_imgs = [ImageTk.PhotoImage(img) for _, _, img in entries]
-    meta = []
-    for name, droplet, _ in entries:
-        parts = droplet.split("|", 3)
-        seed = parts[0] if len(parts) > 0 else "?"
-        num_chunks = parts[1] if len(parts) > 1 else "?"
-        meta.append(f"{name} seed={seed} chunks={num_chunks}")
-
-    total = len(entries)
-    interval_ms = max(1, int(interval_ms))
-    state = {"idx": 0}
-
-    def update():
-        idx = state["idx"]
-        label.configure(image=tk_imgs[idx])
-        info.configure(text=f"{idx+1}/{total} {meta[idx]}")
-        state["idx"] = (idx + 1) % total
-        root.after(interval_ms, update)
-
-    update()
-    root.mainloop()
-
-
-def display_live(
-    fountain: Fountain,
-    filename: str,
-    size: int,
-    border: int,
-    interval_ms: int,
-    error_correction: int,
-):
-    """实时生成新 droplet 并显示（不循环固定的包）"""
-    import tkinter as tk
-    from PIL import ImageTk
-
-    root = tk.Tk()
-    root.title("QR droplet 播放器 (实时)")
-    root.configure(bg="white")
-
-    # 获取屏幕尺寸
-    screen_width = root.winfo_screenwidth()
-    screen_height = root.winfo_screenheight()
-
-    # 计算窗口尺寸
-    window_width = size + 40
-    window_height = size + 80
-
-    # 计算居中位置
-    x = (screen_width - window_width) // 2
-    y = (screen_height - window_height) // 2
-
-    # 设置窗口位置
-    root.geometry(f"{window_width}x{window_height}+{x}+{y}")
-    root.resizable(False, False)
-
-    label = tk.Label(root, bg="white")
-    label.pack(padx=10, pady=10)
-    info = tk.Label(root, bg="white", font=("Arial", 12))
-    info.pack(pady=(0, 10))
-
-    interval_ms = max(1, int(interval_ms))
-    state = {"count": 0, "tk_img": None}
-
-    def update():
-        # 生成新的 droplet
-        droplet_str = fountain.droplet().getStr()
-        img = build_qr(
-            droplet_str,
-            size=size,
-            border=border,
-            error_correction=error_correction,
-        )
-        state["tk_img"] = ImageTk.PhotoImage(img)
-        state["count"] += 1
-
-        # 解析 seed
-        parts = droplet_str.split("|", 3)
-        seed = parts[0] if len(parts) > 0 else "?"
-
-        label.configure(image=state["tk_img"])
-        info.configure(text=f"#{state['count']} {filename} seed={seed} chunks={fountain.num_chunks}")
-        root.after(interval_ms, update)
-
-    update()
-    root.mainloop()
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="读取文件并生成喷泉码二维码，支持单文件、多文件和通配符。"
-    )
-    parser.add_argument(
-        "filename",
-        nargs="*",
-        default=[],
-        help="需要传输的文件路径，支持多个文件或通配符如 *.txt。"
-    )
-    parser.add_argument(
-        "-f", "--file-list",
-        type=str,
-        default=None,
-        help="文件列表文件，每行一个文件路径。"
-    )
-    parser.add_argument(
-        "-o",
-        "--output",
-        default="droplets",
-        help="二维码输出目录（默认 droplets）。",
-    )
-    parser.add_argument(
-        "--chunk-size",
-        type=int,
-        default=512,
-        help="Fountain chunk 大小，默认 512 字节。",
-    )
-    parser.add_argument(
-        "--extra",
-        type=float,
-        default=0.5,
-        help="额外生成 droplet 的比例（默认 0.5，即再多 50%%）。",
-    )
-    parser.add_argument(
-        "--size",
-        type=int,
-        default=800,
-        help="输出二维码图片边长（默认 800 像素）。",
-    )
-    parser.add_argument(
-        "--border",
-        type=int,
-        default=4,
-        help="二维码静区宽度（默认 4 个模块）。",
-    )
-    parser.add_argument(
-        "-i",
-        "--interval",
-        type=int,
-        default=30,
-        dest="display_interval",
-        help="播放间隔毫秒数（默认 30，即约每秒 33 帧）。",
-    )
-    parser.add_argument(
-        "--error-correction",
-        choices=sorted(ERROR_CORRECTION_LEVELS),
-        default="M",
-        help="QR 纠错等级，L/M/Q/H，等级越高越稳但容量越低（默认 M）。",
-    )
-    parser.add_argument(
-        "--no-display",
-        action="store_true",
-        help="仅生成图片，不弹出轮播窗口。",
-    )
-    parser.add_argument(
-        "--no-live",
-        action="store_true",
-        help="禁用实时模式，使用预生成模式循环播放固定的包。",
-    )
-    parser.add_argument(
-        "--no-compress",
-        action="store_true",
-        help="禁用自动压缩（默认会使用 zlib 压缩数据）。",
-    )
-    return parser.parse_args()
-
-
-def get_file_list(args) -> List[Path]:
-    """根据参数获取文件列表"""
-    files = []
-
-    # 从文件列表读取
-    if args.file_list:
-        list_path = Path(args.file_list)
-        if not list_path.is_file():
-            raise FileNotFoundError(f"找不到文件列表：{list_path}")
-        with open(list_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    p = Path(line)
-                    if p.is_file():
-                        files.append(p)
-                    else:
-                        print(f"警告：文件不存在，跳过：{line}")
-
-    # 从命令行参数读取（支持多个文件和通配符）
-    for filename in args.filename:
-        # 检查是否包含通配符
-        if "*" in filename or "?" in filename:
-            matched = glob.glob(filename, recursive=True)
-            for m in matched:
-                p = Path(m)
-                if p.is_file():
-                    files.append(p)
-            if not matched:
-                print(f"警告：通配符 {filename} 没有匹配到任何文件")
+        if args.filename:
+            if args.task and args.task.exists():
+                raise ValueError('新文件不能覆盖已有发送任务; 继续任务请只传 --task')
+            task = SendTask.create(args.filename, args.chunk_size, not args.no_compress)
+            task.save(args.task or Path('tasks') / f'{task.parameters.task_id[:16]}_{time.time_ns()}.qrtx')
+        elif args.task:
+            task = SendTask.load(args.task)
         else:
-            p = Path(filename)
-            if p.is_file():
-                files.append(p)
-            else:
-                print(f"警告：文件不存在，跳过：{filename}")
-
-    # 去重并保持顺序
-    seen = set()
-    unique_files = []
-    for f in files:
-        f_resolved = f.resolve()
-        if f_resolved not in seen:
-            seen.add(f_resolved)
-            unique_files.append(f)
-
-    return unique_files
-
-
-def prepare_file_data(file_path: Path, no_compress: bool) -> Tuple[bytes, str]:
-    """准备文件数据，返回 (处理后的数据, 压缩信息)"""
-    data = file_path.read_bytes()
-    original_size = len(data)
-    compress_info = ""
-
-    if not no_compress:
-        compressed = zlib.compress(data, level=9)
-        if len(compressed) < len(data) * 0.95:
-            data = COMPRESS_MAGIC + compressed
-            ratio = len(data) / original_size * 100
-            compress_info = f"，压缩后 {len(data)} 字节 ({ratio:.1f}%)"
+            parser.error('请指定文件, 或用 --task 打开已有发送任务')
+        requested = None
+        if args.repair:
+            code = args.repair if args.repair.startswith('QRF1:') else Path(args.repair).read_text(encoding='utf-8')
+            feedback = task.request(code)
+            requested = feedback.requested
+            print(f'补传 {len(requested)} 个源块, {len(requested) * task.parameters.chunk_size} 字节载荷, {feedback.description}')
+        print(f"{task.manifest['filename']}: {task.parameters.num_chunks} 个源块. 冻结任务: {task.state_path}")
+        if requested == ():
+            print('请求没有待补传源块.')
+            return 0
+        if args.no_display:
+            if args.output.exists() and any(args.output.iterdir()):
+                raise ValueError('二维码输出目录必须为空, 避免混入其他任务')
+            args.output.mkdir(parents=True, exist_ok=True)
+            for packet, offset, total in task.rounds(requested, args.extra):
+                build_qr(packet.text(), args.size, args.border, ERROR_CORRECTION_LEVELS[args.error_correction]).save(args.output / f'{offset:08d}.png')
+                if offset == total:
+                    break
         else:
-            compress_info = "，压缩无效已跳过"
-
-    return data, compress_info
-
-
-def display_live_multi(
-    fountains: List[Tuple[Fountain, str]],
-    size: int,
-    border: int,
-    interval_ms: int,
-    error_correction: int,
-):
-    """实时生成多文件的 droplet 并循环显示"""
-    import tkinter as tk
-    from PIL import ImageTk
-
-    root = tk.Tk()
-    root.title(f"QR droplet 播放器 (实时，{len(fountains)} 个文件)")
-    root.configure(bg="white")
-
-    screen_width = root.winfo_screenwidth()
-    screen_height = root.winfo_screenheight()
-    window_width = size + 40
-    window_height = size + 80
-    x = (screen_width - window_width) // 2
-    y = (screen_height - window_height) // 2
-    root.geometry(f"{window_width}x{window_height}+{x}+{y}")
-    root.resizable(False, False)
-
-    label = tk.Label(root, bg="white")
-    label.pack(padx=10, pady=10)
-    info = tk.Label(root, bg="white", font=("Arial", 10))
-    info.pack(pady=(0, 10))
-
-    interval_ms = max(1, int(interval_ms))
-    state = {"file_idx": 0, "count": 0, "tk_img": None}
-
-    def update():
-        file_idx = state["file_idx"]
-        fountain, filename = fountains[file_idx]
-
-        droplet_str = fountain.droplet().getStr()
-        img = build_qr(
-            droplet_str,
-            size=size,
-            border=border,
-            error_correction=error_correction,
-        )
-        state["tk_img"] = ImageTk.PhotoImage(img)
-        state["count"] += 1
-
-        parts = droplet_str.split("|", 3)
-        seed = parts[0] if len(parts) > 0 else "?"
-
-        label.configure(image=state["tk_img"])
-        info.configure(text=f"[{file_idx+1}/{len(fountains)}] {filename} #{state['count']} seed={seed} chunks={fountain.num_chunks}")
-
-        # 轮换到下一个文件
-        state["file_idx"] = (file_idx + 1) % len(fountains)
-
-        root.after(interval_ms, update)
-
-    update()
-    root.mainloop()
+            import tkinter as tk
+            from qrcode_tx_gui import SenderApp
+            root = tk.Tk()
+            app = SenderApp(root, task)
+            app.requested = requested
+            app.interval.set(str(args.interval))
+            app.size.set(str(args.size))
+            app.extra = args.extra
+            app.border = args.border
+            app.correction = ERROR_CORRECTION_LEVELS[args.error_correction]
+            app.start()
+            root.mainloop()
+        return 0
+    except (OSError, ValueError) as exc:
+        print(f'发送失败: {exc}', file=sys.stderr)
+        return 1
 
 
-def main():
-    args = parse_args()
-
-    # 获取文件列表
-    if not args.filename and not args.file_list:
-        print("错误：请指定文件路径或使用 -f 指定文件列表")
-        print("用法：python qrcode_tx.py <文件...> 或 python qrcode_tx.py -f file.list")
-        print("      python qrcode_tx.py *.txt  # shell 会自动展开通配符")
-        return
-
-    files = get_file_list(args)
-    if not files:
-        print("错误：没有找到任何文件")
-        return
-
-    print(f"准备传输 {len(files)} 个文件:")
-    for f in files:
-        print(f"  - {f.name}")
-    print()
-    error_correction = ERROR_CORRECTION_LEVELS[args.error_correction]
-
-    # 准备所有文件的 fountain
-    fountains: List[Tuple[Fountain, str]] = []
-    total_files = len(files)
-    for file_idx, file_path in enumerate(files, start=1):
-        data, compress_info = prepare_file_data(file_path, args.no_compress)
-        payload = build_payload(file_path.name, data, file_idx, total_files)
-        fountain = Fountain(payload, chunk_size=args.chunk_size)
-
-        original_size = file_path.stat().st_size
-        print(f"[{file_idx}/{total_files}] {file_path.name} 大小 {original_size} 字节{compress_info}，分块数 {fountain.num_chunks}")
-
-        fountains.append((fountain, file_path.name))
-
-    # 实时模式（默认）：直接开始播放
-    if not args.no_live and not args.no_display:
-        print()
-        print("实时模式启动，循环播放所有文件...")
-        display_live_multi(
-            fountains,
-            args.size,
-            args.border,
-            args.display_interval,
-            error_correction,
-        )
-        return
-
-    # 预生成模式
-    out_dir = Path(args.output)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    display_entries: List[Tuple[str, str, Image.Image]] = []
-
-    for fountain, filename in fountains:
-        total_droplets = fountain.num_chunks + math.ceil(fountain.num_chunks * args.extra)
-        print(f"生成 {filename} 的 {total_droplets} 个二维码...")
-
-        for idx in range(total_droplets):
-            droplet = fountain.droplet().getStr()
-            img = build_qr(
-                droplet,
-                size=args.size,
-                border=args.border,
-                error_correction=error_correction,
-            )
-            img.save(out_dir / f"{filename}_droplet_{idx+1:05d}.png")
-            if not args.no_display:
-                display_entries.append((filename, droplet, img.copy()))
-
-    print(f"已输出到目录：{out_dir.resolve()}")
-    if display_entries and not args.no_display:
-        display_sequence(display_entries, args.display_interval)
-
-
-def build_payload(name: str, body: bytes, file_index: int = 1, total_files: int = 1) -> bytes:
-    """构建 payload，格式：文件名|文件编号|总文件数\n数据"""
-    header = f"{name}|{file_index}|{total_files}\n".encode("utf-8")
-    return header + body
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+    raise SystemExit(main())
